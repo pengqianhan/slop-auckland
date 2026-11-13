@@ -1,0 +1,9 @@
+{
+  "name": "slop-auckland-tools",
+  "private": true,
+  "type": "module",
+  "description": "Build-time tools for Slop Auckland's geodata (the game itself has no build step)",
+  "dependencies": {
+    "geotiff": "^2.1.3"
+  }
+}

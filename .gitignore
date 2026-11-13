@@ -1,0 +1,8 @@
+# Build-time tooling (the game itself has no build step)
+tools/node_modules/
+# Raw extracts fetched by tools/fetch-osm.mjs & tools/fetch-terrain.mjs (about 35 MB; rebuildable)
+tools/data/
+# Pictures written by the tools/debug scripts
+tools/debug/*.png
+.DS_Store
+Thumbs.db
