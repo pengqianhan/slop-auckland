@@ -691,7 +691,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     focusX = x;
     focusZ = z;
     hasView = view;
-    pedRange = player.active && (activeMode === 'car' || activeMode === 'cyclist') && player.entity.position.y > -1
+    pedRange = player.active && (activeMode === 'car' || activeMode === 'cyclist' || activeMode === 'scooter') && player.entity.position.y > -1
       ? Math.sqrt(player.vx * player.vx + player.vz * player.vz) * PED_LOOKAHEAD + player.halfL + 6 : 0;
 
     for (const n of walkedNodes) n.walkers.length = 0;

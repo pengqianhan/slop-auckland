@@ -45,6 +45,9 @@ three.js r187 is loaded from jsDelivr through the import map in `index.html`. Th
   hits harder, knocks people down and dents cars. Knocked-out people lie there a while and are cleared away.
 - **Cars** take damage from crashes (and the bat): smoke, heavy smoke, then the engine dies and the car is a stalled,
   smoking wreck — no fireballs.
+- **E-scooters** are parked around central Auckland, including Queen Street, Britomart, Aotea Square, Wynyard Quarter
+  and Karangahape Road. Look for the mint scooter icons on the map and radar. Press `F` beside one to ride it at up to
+  25 km/h. After a few minutes out of sight, an abandoned scooter returns to its original parking spot.
 - **Side hustles** (the phone): taxi fares in any taxi, three street races with medal times, timed challenges (Bumper
   Cars, Wreck-reation, Howzat!), the export list at the wharf crane, 30 golden kiwis hidden round the city.
 - **Money**: start nearly broke (NZ$150). Jobs pay; sports shops sell a cricket bat and protective padding (armour),
@@ -72,6 +75,7 @@ three.js r187 is loaded from jsDelivr through the import map in `index.html`. Th
 | Get in / out, carjack | `F` | Y | ⏏ |
 | Interact (shops, safehouses, retry, taxi duty) | `G` | B | — |
 | Drive / steer | `W` `S` / `A` `D` | RT LT / left stick | left joystick |
+| Ride an e-scooter | `W` accelerate, `S` or `Space` brake, `A` `D` steer, `F` get on / off | RT accelerate, LT brake, left stick steer, Y get on / off | left joystick, ⏏ |
 | Fly the helicopter | `W` `A` `S` `D`, `Space` climb, `Q` descend | left stick, RT climb, LT descend | left joystick |
 | Sail (`F` aboard / ashore) | `W` trim the sails in, `S` outboard astern, `A` `D` the tiller | RT LT / left stick | left joystick |
 | Horn / radio station | `B` / `,` `.` | — / LB RB (in a vehicle) | — |

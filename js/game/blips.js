@@ -5,7 +5,7 @@
 //   const b = game.blips.add({ x, z, kind: 'objective', label: 'The van', target: van, route: true });
 //   b.set(x, z); b.visible = false; b.remove();
 // kind: 'mission' 'objective' 'destination' 'enemy' 'police' 'shop-sports' 'shop-spray' 'shop-food' 'safehouse'
-//   'hospital' 'pickup' 'race' 'collectible' 'vehicle' 'friend'
+//   'hospital' 'pickup' 'race' 'collectible' 'vehicle' 'scooter' 'friend'
 // route: the HUD draws a GPS route to it. short: a short-range blip (only drawn on the radar when near).
 
 const COLORS = {
@@ -23,6 +23,7 @@ const COLORS = {
   race: '#c58cff',
   collectible: '#ffe066',
   vehicle: '#5ec8ff',
+  scooter: '#68e6c5',
   friend: '#5ec8ff'
 };
 

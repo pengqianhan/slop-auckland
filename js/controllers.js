@@ -31,6 +31,7 @@ import { PersonCrowd, PersonRig } from './pedestrians.js';
 import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
 import { polygonContact } from './building-collision.js';
 import { createSailboatEntity, stepSailboat, SAILBOAT } from './sailboat.js';
+import { SCOOTER } from './scooter.js';
 
 // Player models, animation and movement for walking, driving, cycling, flying (a helicopter, and a kiwi) and sailing
 // (a sailboat on the harbour: js/sailboat.js).
@@ -56,6 +57,10 @@ const BICYCLE_DRIVE = {
   speed: 19, reverseSpeed: 4.5, acceleration: 6.5,
   powerSpeed: 10.5, // Above 38 km/h, rider power limits acceleration.
   rolling: 0.1, drag: 0.004, coast: 0.45, brake: 10.5
+};
+const SCOOTER_DRIVE = {
+  speed: SCOOTER.topSpeed, reverseSpeed: 0, acceleration: 2.8,
+  rolling: 0.17, drag: 0.01, coast: 0.85, brake: 6.5
 };
 
 function driveSpeed(speed, throttle, dt, drive) {
@@ -210,7 +215,7 @@ class ThirdPersonControllerManager {
     this.scene = scene;
     this.colliders = colliders;
     this._colliderCells = null; // built on first use, see nearColliders()
-    this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter' | 'kiwi' | 'boat'
+    this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'scooter' | 'helicopter' | 'kiwi' | 'boat'
     this._collisionListeners = [];
     // The game (js/game) sets gameMode: the one player character walks camera-relative (personControl, fed every
     // frame by game/player.js), the idle pedestrian no longer wanders, and parked vehicles stand still. Codes in
@@ -290,7 +295,7 @@ class ThirdPersonControllerManager {
 
   /** The game's vehicle layer swaps in whichever car (or other vehicle) the player now drives */
   setEntity(mode, entity) {
-    if (!Object.hasOwn(this.entities, mode) || !entity) return;
+    if (!entity || (mode !== 'scooter' && !Object.hasOwn(this.entities, mode))) return;
     this.entities[mode] = entity;
   }
 
@@ -441,6 +446,11 @@ class ThirdPersonControllerManager {
       ent._riderHidden = false;
       ent._posedX = NaN;
       if (ent.helmet) ent.helmet.visible = true;
+    } else if (this.activeMode === 'scooter') {
+      ent.prevX = ent.position.x;
+      ent.prevZ = ent.position.z;
+      ent.leanAngle = ent.groundPitch = 0;
+      ent.leanPivot.rotation.z = ent.steerPivot.rotation.y = 0;
     } else if (heli) {
       ent.verticalSpeed = ent.pitchAngle = ent.rollAngle = 0;
       ent.tiltPivot.rotation.x = ent.tiltPivot.rotation.z = 0;
@@ -460,14 +470,16 @@ class ThirdPersonControllerManager {
   findTeleportPosition(x, z, heading, altitude) {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return null;
     const heli = !!FLYING[this.activeMode];
-    const radius = this.activeMode === 'helicopter' ? 4.5 : this.activeMode === 'person' ? 0.48 : this.activeMode === 'kiwi' ? 0.7 : 0.65;
+    const radius = this.activeMode === 'scooter' ? SCOOTER.collisionRadius : this.activeMode === 'helicopter' ? 4.5
+      : this.activeMode === 'person' ? 0.48 : this.activeMode === 'kiwi' ? 0.7 : 0.65;
     const sinH = Math.sin(heading), cosH = Math.cos(heading);
     const shape = collisionBody(this.activeMode, radius, heading, 0.1);
     const reach = Math.max(shape.extX, shape.extZ);
     const margin = heli ? 6000 : 0;
     const entity = this.getActiveEntity();
     // Conservative body cylinders, including the taxi's corners, bicycle wheels and helicopter tail/rotor.
-    const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], helicopter: [6.2, 3.2], kiwi: [1.0, 1.2], boat: [SAILBOAT.halfL, 13] };
+    const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], scooter: [SCOOTER.halfL, SCOOTER.height],
+      helicopter: [6.2, 3.2], kiwi: [1.0, 1.2], boat: [SAILBOAT.halfL, 13] };
     const others = Object.values(this.entities).filter(e => e !== entity).map(e => ({
       x: e.position.x, z: e.position.z, radius: body[e.type][0],
       bottom: e.position.y - (e.type === 'helicopter' ? 0.7 : 0), top: e.position.y + body[e.type][1]
@@ -1205,7 +1217,15 @@ class ThirdPersonControllerManager {
       const dx = focus ? p.position.x - focus.x : 0;
       const dz = focus ? p.position.z - focus.z : 0;
       // (p.hidden: the game's player sitting in a vehicle)
-      if (!p.hidden && (this.activeMode === 'person' || dx * dx + dz * dz <= maxDistSq)) {
+      if (this.activeMode === 'scooter') {
+        const scooter = this.entities.scooter;
+        p.mesh.visible = false;
+        p._charHidden = false;
+        p.rig.ride(scooter.leanPivot, 0, scooter.riderFrame);
+        p.crowd.begin();
+        p.crowd.add(p.rig, 0);
+        p.crowd.end();
+      } else if (!p.hidden && (this.activeMode === 'person' || dx * dx + dz * dz <= maxDistSq)) {
         p._charHidden = false;
         if (p.mesh) p.mesh.visible = true;
         const groundY = this.getGroundHeight(p.position.x, p.position.z, 'person');
@@ -1309,6 +1329,12 @@ class ThirdPersonControllerManager {
       this.updateCar(dt, elapsed);
     } else if (this.activeMode === 'cyclist') {
       this.updateCyclist(dt, elapsed);
+    } else if (this.activeMode === 'scooter') {
+      const enabled = this.personControl.enabled;
+      const throttle = enabled ? +this.keys.forward : 0;
+      const brake = enabled ? Math.max(+this.keys.backward, +this.keys.up) : 0;
+      const steer = enabled ? +this.keys.left - +this.keys.right : 0;
+      this.simulateScooter(this.entities.scooter, dt, throttle, brake, steer);
     } else if (this.activeMode === 'helicopter') {
       this.updateHelicopter(dt, elapsed);
     } else if (this.activeMode === 'kiwi') {
@@ -1660,23 +1686,7 @@ class ThirdPersonControllerManager {
       b.heading += turnInput * 2.15 * dirSign * dt;
     }
 
-    const prevX = b.position.x;
-    const prevZ = b.position.z;
-    const sinH = Math.sin(b.heading);
-    const cosH = Math.cos(b.heading);
-    const nextX = prevX + sinH * b.speed * dt;
-    const nextZ = prevZ + cosH * b.speed * dt;
-    b.position.x = nextX;
-    b.position.z = nextZ;
-    this.resolveHorizontalCollision(b.position, 0.65, null, b);
-
-    // Prevent phantom speed buildup when blocked head-on by a building or shoreline boundary
-    if (Math.abs(b.position.x - nextX) > 1e-6 || Math.abs(b.position.z - nextZ) > 1e-6) {
-      const actualFwd = ((b.position.x - prevX) * sinH + (b.position.z - prevZ) * cosH) / dt;
-      if (b.speed > 0 && actualFwd < b.speed) b.speed = Math.max(0, actualFwd);
-      else if (b.speed < 0 && actualFwd > b.speed) b.speed = Math.min(0, actualFwd);
-    }
-    this.rideGround(b, 0.55, 0, dt);
+    this.moveTwoWheeler(b, dt, 0.55, 0.65);
 
     const targetLean = -turnInput * Math.min(1.0, Math.abs(b.speed) / 9.0) * 0.34;
     b.leanAngle += (targetLean - b.leanAngle) * Math.min(1, dt * 9);
@@ -1691,6 +1701,48 @@ class ThirdPersonControllerManager {
     if (throttle > 0 && wheelDelta > 0) b.pedalPhase += wheelDelta / 3.2;
     b.crankPivot.rotation.x = b.pedalPhase;
     for (const pedal of b.pedals) pedal.rotation.x = -b.pedalPhase;
+  }
+
+  simulateScooter(e, dt, throttle = 0, brake = 0.45, steer = 0) {
+    if (dt <= 0) return;
+    if (e.speed < 0) e.speed = Math.min(0, e.speed + SCOOTER_DRIVE.brake * dt);
+    else e.speed = driveSpeed(e.speed, brake ? -brake : throttle, dt, SCOOTER_DRIVE);
+    if (Math.abs(e.speed) < 0.04 && !throttle) e.speed = 0;
+
+    const response = 1 - Math.exp(-12 * dt);
+    e.steerPivot.rotation.y += (steer * 0.48 - e.steerPivot.rotation.y) * response;
+    // Full lock at walking pace, with a wider turning radius as speed picks up.
+    const speed = e.speed;
+    const pivot = Math.max(0, 1 - Math.abs(speed) / 1.5) * 2.1;
+    const turn = e.steerPivot.rotation.y * (pivot + speed * 1.45 / (1 + speed * speed / 20));
+    e.heading += turn * dt;
+    this.moveTwoWheeler(e, dt, SCOOTER.axle, SCOOTER.collisionRadius);
+
+    const lean = -Math.max(-0.26, Math.min(0.26, turn * e.speed / 18));
+    e.leanAngle += (lean - e.leanAngle) * response;
+    e.leanPivot.rotation.z = e.leanAngle;
+    const wheelStep = e.speed * dt / SCOOTER.wheelRadius;
+    e.frontWheel.rotation.x = (e.frontWheel.rotation.x + wheelStep) % (Math.PI * 2);
+    e.rearWheel.rotation.x = e.frontWheel.rotation.x;
+  }
+
+  moveTwoWheeler(e, dt, axle, radius) {
+    const { x, z } = e.position;
+    e.prevX = x;
+    e.prevZ = z;
+    const sinH = Math.sin(e.heading), cosH = Math.cos(e.heading);
+    const nextX = x + sinH * e.speed * dt, nextZ = z + cosH * e.speed * dt;
+    e.position.x = nextX;
+    e.position.z = nextZ;
+    this.resolveHorizontalCollision(e.position, radius, null, e);
+
+    // Prevent speed building up when a wall or shoreline blocks travel.
+    if (Math.abs(e.position.x - nextX) > 1e-6 || Math.abs(e.position.z - nextZ) > 1e-6) {
+      const actualFwd = ((e.position.x - x) * sinH + (e.position.z - z) * cosH) / dt;
+      if (e.speed > 0) e.speed = Math.max(0, Math.min(e.speed, actualFwd));
+      else if (e.speed < 0) e.speed = Math.min(0, Math.max(e.speed, actualFwd));
+    }
+    this.rideGround(e, axle, 0, dt);
   }
 
   updateHelicopter(dt, elapsed) {

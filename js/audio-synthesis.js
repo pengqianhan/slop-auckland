@@ -298,7 +298,7 @@ function smoothParameter(parameter, timeConstant = 0.07, epsilon = 0.0001, snapI
 }
 
 export function createMotorVoice(context, resources, kind, output) {
-  if (!['sedan', 'suv', 'bus', 'helicopter', 'cyclist', 'siren'].includes(kind)) {
+  if (!['sedan', 'suv', 'bus', 'helicopter', 'cyclist', 'scooter', 'siren'].includes(kind)) {
     throw new RangeError(`Unknown motor voice: ${kind}`);
   }
   const nodes = [];
@@ -554,6 +554,22 @@ export function createMotorVoice(context, resources, kind, output) {
       chainRate(Math.max(0.01, speed / (2 * Math.PI * 0.35 * 3.2)) * doppler, now);
       chainFrequency((2500 + load * 600) * doppler, now);
       noiseRate((0.9 + Math.min(1, movement) * 0.2) * doppler, now);
+    };
+  } else if (kind === 'scooter') {
+    const motor = oscillator('triangle', 130);
+    const motorGain = gain();
+    motor.connect(motorGain).connect(mix);
+    const road = loop();
+    const tireGain = gain();
+    road.connect(filter('bandpass', 530)).connect(tireGain).connect(mix);
+    const motorPitch = smoothParameter(motor.frequency, 0.06);
+    const motorLevel = smoothParameter(motorGain.gain, 0.08);
+    const tireLevel = smoothParameter(tireGain.gain, 0.12);
+    render = (speed, load, doppler, now) => {
+      const moving = Math.min(1, speed / 2);
+      motorPitch((130 + speed * 58) * doppler, now);
+      motorLevel(moving * (0.003 + load * 0.027), now);
+      tireLevel(Math.min(1, speed / 7) * 0.018, now);
     };
   } else {
     const siren = oscillator(resources.sirenWave, 1125);

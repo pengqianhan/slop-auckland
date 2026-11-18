@@ -30,6 +30,11 @@ const TIPS = {
     gamepad: '[RT] drives, [LT] brakes and reverses, the left stick steers. {enterExit} gets out.',
     touch: 'The left stick drives and steers. Tap ⏏ to get out.'
   }),
+  scooter: (g) => byDevice(g, {
+    keyboard: '[W] accelerates. [S] or [Space] brakes. [A][D] steer. {enterExit} gets off.',
+    gamepad: '[RT] accelerates and [LT] brakes. Steer with the left stick. {enterExit} gets off.',
+    touch: 'Push the left stick forward to accelerate, back to brake, and sideways to steer. Tap ⏏ to get off.'
+  }),
   heli: (g) => byDevice(g, {
     keyboard: 'Fly with [W][A][S][D]; [Space] climbs, [Q] comes down. Set it down gently.',
     gamepad: 'The left stick flies; [RT] climbs, [LT] comes down. Set it down gently.',
@@ -55,6 +60,7 @@ const TIPS = {
 // a tip still worth saying when its turn comes (else it waits for the next time: the first flight after a crash...)
 const STILL = {
   drive: (g) => g.player?.vehicle?.mode === 'car',
+  scooter: (g) => g.player?.vehicle?.mode === 'scooter',
   heli: (g) => g.player?.vehicle?.mode === 'helicopter',
   weapon: (g) => !!g.player?.onFoot,
   tackled: (g) => g.wanted?.level > 0,
@@ -94,6 +100,7 @@ function createTips(game, { hud }) {
     if (!v) return;
     if (v.mode === 'helicopter') tip('heli', true);
     else if (v.mode === 'car') tip('drive', true);
+    else if (v.mode === 'scooter') tip('scooter', true);
   });
   on('weapon:pickup', (e) => {
     if (e?.weaponId === 'bat') tip('weapon', true);

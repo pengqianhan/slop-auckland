@@ -2231,22 +2231,21 @@ class PersonRig {
   }
 
   /**
-   * Riding a bicycle: `root` (Object3D) is the bike frame (pose in its parent's space, e.g. the scene), `crank` the
-   * pedal crank angle. Seat, bars and bottom bracket in the frame's space (metres, +Z forward).
+   * Pose a rider on the vehicle frame (metres, +Z forward). Feet follow the bicycle crank or stand on the scooter deck.
    */
-  ride(root, crank, { seat, bars, gripHalf = 0.22, bracket, crankLength = 0.17 }) {
+  ride(root, crank, { seat, bars, gripHalf = 0.22, bracket, crankLength = 0.17, deck, steerPivot }) {
     const s = this.s;
+    const standing = deck !== undefined;
     this.gait = 0;
     this.run = 0;
     root.updateWorldMatrix(true, false);
     root.matrixWorld.decompose(_rootPos, _qRoot, _v);
     const toWorld = (local) => local.applyQuaternion(_qRoot).add(_rootPos);
 
-    // Pelvis on the saddle, leaning forward; chest further forward, head up looking ahead
-    qX(_qPelvis, 0.42).premultiply(_qRoot);
-    toWorld(_pelvis.set(0, seat.y + 0.055 * s, seat.z + 0.03));
+    qX(_qPelvis, standing ? 0.09 : 0.42).premultiply(_qRoot);
+    toWorld(standing ? _pelvis.set(0, deck + (HIP_Y - 0.055) * s, -0.2) : _pelvis.set(0, seat.y + 0.055 * s, seat.z + 0.03));
     this.writeBone(BONE.PELVIS, _qPelvis, _pelvis);
-    _qChest.copy(_qPelvis).multiply(qX(_q, 0.2));
+    _qChest.copy(_qPelvis).multiply(qX(_q, standing ? 0.1 : 0.2));
     this.writeBone(BONE.CHEST, _qChest, this.jointFrom(BONE.PELVIS, BONE.CHEST, _qPelvis, _pelvis, _chest));
     _qa.copy(_qRoot).multiply(qX(_q, -0.12));
     this.jointFrom(BONE.CHEST, BONE.HEAD, _qChest, _chest, _v);
@@ -2254,24 +2253,29 @@ class PersonRig {
     this.headPosition = (this.headPosition || new THREE.Vector3()).copy(_v);
     this.headQuaternion = (this.headQuaternion || new THREE.Quaternion()).copy(_qa);
 
-    // Hands on the grips (elbows out & down, the arms' front kept towards the bike's front), feet on the pedals
-    // (knees over the feet)
+    const steer = steerPivot?.rotation.y ?? 0;
     _fwd.set(0, 0, 1).applyQuaternion(_qRoot);
     this.yaw = Math.atan2(_fwd.x, _fwd.z);
     for (let i = 0; i < 2; i++) {
       const side = SIDES[i];
       this.jointFrom(BONE.CHEST, LIMB.upperArm[i], _qChest, _chest, _shoulder);
-      toWorld(_target.set(side * gripHalf, bars.y + 0.02, bars.z - 0.07));
+      toWorld(_target.set(side * gripHalf * Math.cos(steer), bars.y + 0.02, bars.z - (standing ? 0.025 : 0.07) - side * gripHalf * Math.sin(steer)));
       _pole.set(side * 0.6, -1, -0.4).applyQuaternion(_qRoot);
       this.limb(LIMB.upperArm[i], LIMB.forearm[i], _shoulder, _target, UPPER_ARM * s, (FOREARM + 0.07) * s, _pole, _fwd, side * ARM_BIND_ABDUCTION);
 
-      // pedals go round bottom, back, top, front as `crank` grows (pedalling forwards)
-      const a = crank + (i === 0 ? 0 : Math.PI);
-      const footPitch = 0.16 + 0.16 * Math.cos(a) - 0.1 * Math.sin(a);
-      qX(_q2, footPitch);
-      // ball of the foot on the pedal: ankle = pedal - R * (ball offset from the ankle)
-      _v2.set(0, TOE_JOINT.y * s - 0.012, TOE_JOINT.z * s * 0.85).applyQuaternion(_q2);
-      _target.set(side * 0.1, bracket.y - Math.cos(a) * crankLength, bracket.z - Math.sin(a) * crankLength).sub(_v2);
+      let footPitch = 0;
+      if (standing) {
+        // Stagger the feet along the narrow deck.
+        _target.set(side * 0.052, deck + ANKLE_H * s, i === 0 ? -0.03 : -0.37);
+      } else {
+        // Pedals go round bottom, back, top, front as the crank turns.
+        const a = crank + (i === 0 ? 0 : Math.PI);
+        footPitch = 0.16 + 0.16 * Math.cos(a) - 0.1 * Math.sin(a);
+        qX(_q2, footPitch);
+        // Ball of the foot on the pedal: ankle = pedal - R * (ball offset from the ankle).
+        _v2.set(0, TOE_JOINT.y * s - 0.012, TOE_JOINT.z * s * 0.85).applyQuaternion(_q2);
+        _target.set(side * 0.1, bracket.y - Math.cos(a) * crankLength, bracket.z - Math.sin(a) * crankLength).sub(_v2);
+      }
       toWorld(_target);
       this.jointFrom(BONE.PELVIS, LIMB.thigh[i], _qPelvis, _pelvis, _hip);
       const ankle = this.solveLeg(i, _hip, _target, this.yaw);

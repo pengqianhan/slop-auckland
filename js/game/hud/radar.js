@@ -211,6 +211,24 @@ function drawGlyph(g, kind, color) {
       g.arc(2.8, 2.4, 1.3, 0, Math.PI * 2);
       g.fill();
       break;
+    case 'scooter':
+      token();
+      g.strokeStyle = color;
+      g.lineWidth = 1.35;
+      g.beginPath();
+      g.moveTo(-4, 2.4);
+      g.lineTo(1.8, 2.4);
+      g.lineTo(3.8, 3.6);
+      g.lineTo(2.2, -4.3);
+      g.lineTo(4.2, -4.3);
+      g.stroke();
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(-4, 3.6, 1.35, 0, Math.PI * 2);
+      g.moveTo(5.55, 3.6);
+      g.arc(4.2, 3.6, 1.35, 0, Math.PI * 2);
+      g.fill();
+      break;
     default:
       disc(5.6, color);
   }

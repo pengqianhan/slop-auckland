@@ -482,7 +482,7 @@ function createHud(game, root, { reducedMotion }) {
   const was = {
     hp: -1, ap: -1, sp: -1, low: null, money: NaN, level: -1, maxLevel: -1, evading: null, wantedShown: null,
     weapon: '', pips: '', weaponShown: null, cross: null, arrest: -1, vehicle: null, speed: -1, rpm: -1,
-    gear: '', vhp: -1, vstate: '', vbike: null, timer: -1
+    gear: '', red: false, vhp: -1, vstate: '', vbike: null, timer: -1
   };
 
   function update(dt, realDt) {
@@ -621,6 +621,7 @@ function createHud(game, root, { reducedMotion }) {
       st.speedTimer = 0.06;
       const heli = v.mode === 'helicopter';
       const boat = v.mode === 'boat';
+      const scooter = v.mode === 'scooter';
       const kmh = Math.abs(v.speed || 0) * 3.6;
       const speed = heli ? Math.max(0, Math.round((Number.isFinite(v.y) ? v.y : p.position.y) + GEO.frame.sea)) : boat ? Math.round(kmh / 1.852) : Math.round(kmh);
       if (speed !== was.speed) {
@@ -631,14 +632,21 @@ function createHud(game, root, { reducedMotion }) {
       while (gear < GEARS.length && kmh >= GEARS[gear]) gear++;
       const lo = GEARS[gear - 1], hi = gear < GEARS.length ? GEARS[gear] : GEARS[GEARS.length - 1] + 40;
       const reverse = (v.speed || 0) < -0.3;
-      const rpmRaw = heli ? Math.min(1, kmh / 190) : boat ? Math.min(1, v.entity?.power || 0) : reverse ? Math.min(1, kmh / 25) : 0.12 + 0.88 * Math.min(1, (kmh - lo) / (hi - lo));
+      const rpmRaw = heli ? Math.min(1, kmh / 190) : boat ? Math.min(1, v.entity?.power || 0)
+        : scooter ? Math.min(1, kmh / (game.vehicles.KINDS.scooter.topSpeed * 3.6))
+        : reverse ? Math.min(1, kmh / 25) : 0.12 + 0.88 * Math.min(1, (kmh - lo) / (hi - lo));
       const rpm = Math.round(rpmRaw * 24) / 24;
       if (rpm !== was.rpm) {
         was.rpm = rpm;
         revFill.style.transform = `scaleX(${rpm})`;
-        rev.classList.toggle('is-red', rpm > 0.9);
       }
-      const gearText = heli ? 'Altitude' : boat ? (reverse ? 'Motoring astern' : pointOfSail(Math.abs(v.entity?.offWind || 0) * 57.3)) : reverse ? 'Gear R' : kmh < 1 ? 'Gear N' : GEAR_TEXT[gear];
+      const red = !scooter && rpm > 0.9;
+      if (red !== was.red) {
+        was.red = red;
+        rev.classList.toggle('is-red', red);
+      }
+      const gearText = heli ? 'Altitude' : boat ? (reverse ? 'Motoring astern' : pointOfSail(Math.abs(v.entity?.offWind || 0) * 57.3))
+        : scooter ? 'Electric' : reverse ? 'Gear R' : kmh < 1 ? 'Gear N' : GEAR_TEXT[gear];
       if (gearText !== was.gear) {
         was.gear = gearText;
         gearEl.textContent = gearText;
@@ -653,7 +661,7 @@ function createHud(game, root, { reducedMotion }) {
         was.vstate = vstate;
         vdmg.dataset.state = vstate;
       }
-      const vbike = v.mode === 'cyclist' || v.mode === 'boat';
+      const vbike = v.mode === 'cyclist' || v.mode === 'boat' || scooter;
       if (vbike !== was.vbike) {
         was.vbike = vbike;
         vdmg.classList.toggle('is-hidden', vbike);

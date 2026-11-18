@@ -44,11 +44,11 @@
 //   and the police keep the bat; a hospital trip keeps it). A vehicle hit takes 6.5 health per m/s over 2.5 m/s.
 //
 // VEHICLES (vehicles.js) game.vehicles ------------------------------------------------------------------------------
-//   WorldVehicle: { id, type: 'world', kind (taxi sedan suv minivan pickup van bicycle helicopter sailboat), mode ('car' |
-//     'cyclist' | 'helicopter' | 'boat'), label, police, hero, health/maxHealth, state ('ok'|'smoking'|'wrecked'),
+//   WorldVehicle: { id, type: 'world', kind (taxi sedan suv minivan pickup van bicycle scooter helicopter sailboat), mode ('car' |
+//     'cyclist' | 'scooter' | 'helicopter' | 'boat'), label, police, hero, health/maxHealth, state ('ok'|'smoking'|'wrecked'),
 //     driver ('player'|'ai'|null), locked, persistent, hidden, x y z heading speed vx vz (synced each frame), halfW
 //     halfL height mass, entity (physics: position Vector3, heading, speed...), record (traffic car drawn for it) }
-//   list()  current  busy  heroes { taxi, bicycle, helicopter, boats[] }  KINDS  lastShore (where the player stepped aboard)
+//   list()  current  busy  heroes { taxi, bicycle, helicopter, boats[], scooters[] }  KINDS  lastShore (where the player stepped aboard)
 //   Sailboats (js/sailboat.js): moored at Queens Wharf (and Devonport); boarded from the quay within 13 m, stepped off
 //   onto the nearest wharf / shore within 20 m (or a city-config.js LANDINGS' land); tied up where left, no damage.
 // SAILING (sailing.js) game.sailing --- { wind (WIND: dir, strength), fleet [{ entity, route, wp }] }: the harbour's
@@ -137,6 +137,7 @@ import { createWorld, RAY_MASK } from './world.js';
 import { createFx } from './fx.js';
 import { createPlayer } from './player.js';
 import { createVehicles } from './vehicles.js';
+import { createBlips } from './blips.js';
 // ---- SYSTEMS (weapons, police, missions, HUD...): one import here, one register line below -------------------------
 import { registerWeapons } from './weapons.js';
 import { registerPolice } from './police.js';
@@ -174,6 +175,7 @@ function createGame({ scene, renderer, controllerManager, cameraSystem, trafficS
 
   // ---- the game proper --------------------------------------------------------------------------------------------
   controllerManager.gameMode = true;
+  game.blips = createBlips(game);
   cameraSystem.freeLook = true;
   cameraSystem.collide = game.world.clearance;
   game.input = createInput(game, { canvas: renderer.domElement, cameraSystem, controllerManager, getMapOpen: () => !!mapSystem?.isFullMapOpen });

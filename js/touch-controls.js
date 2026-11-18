@@ -94,7 +94,7 @@ class TouchControls {
   }
 
   setMode(mode) {
-    if (!['person', 'car', 'cyclist', 'helicopter', 'kiwi'].includes(mode)) return;
+    if (!['person', 'car', 'cyclist', 'scooter', 'helicopter', 'kiwi'].includes(mode)) return;
     const flying = mode === 'helicopter' || mode === 'kiwi';
     this.reset();
     if (!this.root) return;

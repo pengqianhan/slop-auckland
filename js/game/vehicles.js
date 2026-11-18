@@ -1,8 +1,9 @@
 import * as THREE from 'three/webgpu';
 import { vehicleContact, sweptVehicleContact, resolveVehicleContact } from '../vehicle-physics.js';
 import { terrainHeight } from '../terrain.js';
-import { ISLAND_BOUNDS, LL, shoreDistance, LANDINGS, landingAt, landingGround } from '../city-config.js';
+import { AKL_LANDMARKS, ISLAND_BOUNDS, LL, SPAWN, blockAt, nearestRoads, shoreDistance, LANDINGS, landingAt, landingGround } from '../city-config.js';
 import { createSailboatEntity, stepSailboat, poseSailboat } from '../sailboat.js';
+import { createScooterEntity, SCOOTER } from '../scooter.js';
 
 // The vehicle layer: every vehicle the player can get into is a "world vehicle". The hero taxi, bicycle and
 // helicopter are the controllers' own entities (their own meshes); any other car is a traffic car record taken off
@@ -26,6 +27,7 @@ const KINDS = {
   pickup: { mode: 'car', label: 'Ute', halfW: 0.96, halfL: 2.78, height: 1.85, mass: 2400, chase: 1.12, lift: 0.22 },
   van: { mode: 'car', label: 'Van', halfW: 0.95, halfL: 2.88, height: 2.45, mass: 2700, chase: 1.2, lift: 0.55 },
   bicycle: { mode: 'cyclist', label: 'Bicycle', halfW: 0.32, halfL: 0.9, height: 1.15, mass: 20 },
+  scooter: { mode: 'scooter', label: 'E-Scooter', ...SCOOTER },
   helicopter: { mode: 'helicopter', label: 'Helicopter', halfW: 1.25, halfL: 4.3, height: 3.1, mass: 3000 },
   sailboat: { mode: 'boat', label: 'Sailboat', halfW: 1.35, halfL: 4.6, height: 13, mass: 3200 }
 };
@@ -52,6 +54,8 @@ const BERTHS = [
 ];
 const BOAT_REACH = 13; // m from the quay to a boat's side (people keep a few metres back from the edge)
 const BOAT_ASHORE = 20; // m from a boat to the ground she can be left from
+const SCOOTER_LANDMARKS = ['skytower', 'ferry', 'britomart', 'viaduct', 'wynyard', 'aotea', 'albertpark', 'university', 'kroad', 'victoriapark', 'arena'];
+const SCOOTER_RETURN_TIME = 180;
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const wrap = (a) => a - Math.round(a / (Math.PI * 2)) * Math.PI * 2;
@@ -154,6 +158,25 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     v.invulnerable = true;
     return v;
   });
+  const scooterSites = [
+    { x: SPAWN.x + 16 * Math.sin(SPAWN.heading) + 7 * Math.cos(SPAWN.heading),
+      z: SPAWN.z + 16 * Math.cos(SPAWN.heading) - 7 * Math.sin(SPAWN.heading) },
+    ...AKL_LANDMARKS.filter((landmark) => SCOOTER_LANDMARKS.includes(landmark.id))
+  ];
+  const scooters = [];
+  for (const site of scooterSites) {
+    const home = scooterParking(site);
+    if (!home) continue;
+    const e = createScooterEntity(home.x, home.y, home.z, home.heading);
+    cm.scene.add(e.mesh);
+    cm.rideGround(e, SCOOTER.axle, 0, 1);
+    syncScooterMesh(e);
+    const v = makeVehicle('scooter', e, null, { hero: true, persistent: true, home });
+    v.invulnerable = true;
+    v.awake = false;
+    v.blip = game.blips.add({ kind: 'scooter', label: v.label, target: v, short: true });
+    scooters.push(v);
+  }
   let lastShore = null; // where the player stepped aboard from (the save keeps them ashore)
   // (the kiwi belongs to the sandbox)
   cm.entities.kiwi.mesh.visible = false;
@@ -188,6 +211,43 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     return best;
   }
 
+  function scooterParking(site) {
+    let best = null, bestDistance = Infinity;
+    for (const n of nearestRoads(site.x, site.z, 150)) {
+      if (n.road.closed || n.road.bridge) continue;
+      for (const along of [0, 8, -8, 16, -16, 24, -24, 32, -32]) {
+        for (const side of [-1, 1]) {
+          // Look for the actual kerb rather than assuming the mapped road runs down its centre.
+          const edge = Math.max(2, n.road.w / 2 - 1.5);
+          for (let offset = edge; offset <= edge + 5; offset += 0.75) {
+            const x = n.x + n.dx * along + n.dz * side * offset;
+            const z = n.z + n.dz * along - n.dx * side * offset;
+            const distance = Math.hypot(x - site.x, z - site.z);
+            if (distance >= bestDistance) continue;
+            const block = blockAt(x, z);
+            if (!block || block.median || block.kind === 3 || shoreDistance(x, z) < 10) continue;
+            // Both wheels and the space to step off on the kerb side should be on the footpath.
+            if (blockAt(x + n.dx * SCOOTER.axle, z + n.dz * SCOOTER.axle) !== block ||
+                blockAt(x - n.dx * SCOOTER.axle, z - n.dz * SCOOTER.axle) !== block ||
+                blockAt(x + n.dz * side * 0.7, z - n.dx * side * 0.7) !== block) continue;
+            const y = cm.getGroundHeight(x, z, 'scooter', Infinity, 1);
+            if (!cm.isClear(x, z, y, 1.25) || nearest(x, z, 3)) continue;
+            best = { x, y, z, heading: Math.atan2(-side * n.dx, -side * n.dz) };
+            bestDistance = distance;
+            break;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  function syncScooterMesh(e) {
+    e.mesh.position.copy(e.position);
+    e.mesh.rotation.set(e.groundPitch, e.heading, 0, 'YXZ');
+    e.mesh.updateMatrixWorld();
+  }
+
   // What F would get the player into: a world vehicle, or a traffic car to steal
   const candidate = { vehicle: null, record: null, distance: Infinity, verb: '' };
   function findCandidate() {
@@ -218,7 +278,8 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       }
     }
     const v = candidate.vehicle;
-    candidate.verb = candidate.record ? 'Steal' : !v ? '' : v.mode === 'cyclist' ? 'Ride' : v.mode === 'helicopter' ? 'Fly' : v.mode === 'boat' ? 'Sail' : 'Enter';
+    candidate.verb = candidate.record ? 'Steal' : !v ? '' : v.mode === 'cyclist' || v.mode === 'scooter' ? 'Ride'
+      : v.mode === 'helicopter' ? 'Fly' : v.mode === 'boat' ? 'Sail' : 'Enter';
     return candidate;
   }
 
@@ -269,8 +330,9 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
   // The driver's door: New Zealand cars are right-hand drive (local -x is the right side); a bicycle from its side,
   // the helicopter by its right-hand cabin door
   function doorPoint(kind, x, z, heading, hw, out) {
-    const lx = kind === 'bicycle' ? -0.65 : kind === 'helicopter' ? -1.65 : -(hw + 0.55);
-    const lz = kind === 'bicycle' ? 0 : kind === 'helicopter' ? 0.9 : 0.3;
+    const twoWheels = kind === 'bicycle' || kind === 'scooter';
+    const lx = twoWheels ? -0.65 : kind === 'helicopter' ? -1.65 : -(hw + 0.55);
+    const lz = twoWheels ? 0 : kind === 'helicopter' ? 0.9 : 0.3;
     const s = Math.sin(heading), c = Math.cos(heading);
     out.x = x + lx * c + lz * s;
     out.z = z - lx * s + lz * c;
@@ -301,6 +363,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       if (cm.entities.car !== v.entity && cm.entities.car === taxiEntity) setTaxiLights(false);
       cm.setEntity('car', v.entity);
     }
+    if (v.mode === 'scooter') cm.setEntity('scooter', v.entity);
     if (v.mode === 'boat') {
       lastShore = { x: person.position.x, y: person.position.y, z: person.position.z };
       cm.setEntity('boat', v.entity);
@@ -336,9 +399,11 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
   }
 
   // Where the player can step out: the driver's side first, then the other side, behind, in front
+  const stepOff = (hw, hl) => [[-0.75, 0], [0.75, 0], [0, -(hl + 0.5)], [0, hl + 0.5]];
   const EXITS = {
     car: (hw, hl) => [[-(hw + 0.6), 0.35], [hw + 0.6, 0.35], [-(hw + 0.6), -1.2], [hw + 0.6, -1.2], [0, -(hl + 0.8)], [0, hl + 0.8]],
-    cyclist: () => [[-0.75, 0], [0.75, 0], [0, -1.4], [0, 1.4]],
+    cyclist: stepOff,
+    scooter: stepOff,
     helicopter: () => [[-1.8, 0.9], [1.8, 0.9], [-1.8, -1.5], [1.8, -1.5], [0, 3.4]],
     boat: () => [[-2.2, 0], [2.2, 0], [0, -5.4]]
   };
@@ -479,8 +544,8 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       // a firm stop (about 0.9 g), then out
       e.speed = Math.sign(e.speed) * Math.max(0, Math.abs(e.speed) - 9 * dt);
       const k = Math.exp(-6 * dt);
-      e.vx *= k;
-      e.vz *= k;
+      if (e.vx) e.vx *= k;
+      if (e.vz) e.vz *= k;
       if (e.carState) e.carState.value.x = 1;
       if (Math.abs(e.speed) < 1.2 || action.t > 4) exit();
       return;
@@ -650,7 +715,9 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     stopEffects(v);
     const e = v.entity;
     const h = v.home;
-    e.position.set(h.x, v.mode === 'helicopter' ? padY : v.mode === 'boat' ? ISLAND_BOUNDS.waterLevel : world.groundHeight(h.x, h.z), h.z);
+    const y = v.mode === 'helicopter' ? padY : v.mode === 'boat' ? ISLAND_BOUNDS.waterLevel
+      : v.mode === 'scooter' ? h.y : world.groundHeight(h.x, h.z);
+    e.position.set(h.x, y, h.z);
     e.heading = h.heading;
     e.speed = e.vx = e.vz = e.angularVel = 0;
     if (v.mode === 'boat') {
@@ -662,6 +729,11 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     if (v.mode === 'helicopter') {
       e.verticalSpeed = 0;
       e.rotorSpeed = 0;
+    }
+    if (v.mode === 'scooter') {
+      e.leanAngle = e.leanPivot.rotation.z = e.steerPivot.rotation.y = 0;
+      cm.rideGround(e, SCOOTER.axle, 0, 1);
+      syncScooterMesh(e);
     }
     e.prevX = h.x;
     e.prevZ = h.z;
@@ -885,7 +957,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     // the player feels a big one
     if (target === current && game.player) {
       if (current.mode === 'car') game.player.damage(Math.max(0, speed - 13) * 2.2, { kind: 'crash', source: other });
-      else if (current.mode === 'cyclist' && speed > 7) {
+      else if ((current.mode === 'cyclist' || current.mode === 'scooter') && speed > 7) {
         game.player.damage((speed - 5) * 5, { kind: 'crash', source: other });
         exit({ bail: true });
       }
@@ -1100,6 +1172,12 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       } else {
         stepSailboat(e, 0, 0, dt, game.time);
       }
+    } else if (v.mode === 'scooter') {
+      cm.simulateScooter(e, dt);
+      if (e.speed === 0 && Math.abs(e.leanAngle) < 0.01 && Math.abs(e.steerPivot.rotation.y) < 0.01) {
+        e.leanAngle = e.leanPivot.rotation.z = e.steerPivot.rotation.y = 0;
+        v.awake = false;
+      }
     } else if (v.mode === 'cyclist') {
       e.speed *= Math.exp(-dt * 2.5);
       e.position.x += Math.sin(e.heading) * e.speed * dt;
@@ -1183,6 +1261,15 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       if (heroBoats.some((o) => o !== v && Math.hypot(o.entity.position.x - h.x, o.entity.position.z - h.z) < 10)) continue;
       sendHome(v);
     }
+    for (const v of scooters) {
+      if (v.driver || v.awake || action?.vehicle === v || game.time - v.lastUsed < SCOOTER_RETURN_TIME) continue;
+      const e = v.entity, h = v.home;
+      if (Math.hypot(e.position.x - h.x, e.position.z - h.z) < 4) continue;
+      if (Math.hypot(e.position.x - p.x, e.position.z - p.z) < 120 || Math.hypot(h.x - p.x, h.z - p.z) < 120) continue;
+      if (traffic.game.nearView(e.position.x, e.position.z, 2, 300) || traffic.game.nearView(h.x, h.z, 2, 300)) continue;
+      if (nearest(h.x, h.z, 2) || !clearForPerson(h.x, h.z, h.y, false)) continue;
+      sendHome(v);
+    }
     for (const v of [heroTaxi, heroBike, heroHeli]) {
       if (!v.respawnPending) continue;
       const h = v.home;
@@ -1211,7 +1298,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       collidePerson();
       for (const v of vehicles) {
         if (v.hidden) continue;
-        if ((v === current || v.awake || v.driver) && v.mode !== 'cyclist' && v.mode !== 'boat') runOver(v);
+        if ((v === current || v.awake || v.driver) && v.mode !== 'cyclist' && v.mode !== 'scooter' && v.mode !== 'boat') runOver(v);
         if (v.state !== 'ok') updateEffects(v);
       }
       updateSmokingTraffic();
@@ -1226,6 +1313,8 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     // the sync fields everyone may read
     for (const v of vehicles) {
       const e = v.entity;
+      if (v.mode === 'scooter' && (v === current || v.awake || v.x !== e.position.x || v.z !== e.position.z || v.speed !== e.speed)) syncScooterMesh(e);
+      if (v.blip) v.blip.visible = !v.driver && !v.hidden;
       v.x = e.position.x;
       v.y = e.position.y;
       v.z = e.position.z;
@@ -1321,7 +1410,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     get busy() {
       return !!action;
     },
-    heroes: { taxi: heroTaxi, bicycle: heroBike, helicopter: heroHeli, boats: heroBoats },
+    heroes: { taxi: heroTaxi, bicycle: heroBike, helicopter: heroHeli, boats: heroBoats, scooters },
     /** Where the player stepped aboard the boat they are sailing (null ashore): the save keeps them on land */
     get lastShore() {
       return lastShore;

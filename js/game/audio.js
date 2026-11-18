@@ -753,7 +753,7 @@ export function registerAudio(game) {
     const v = e.vehicle;
     if (!live() || !v) return;
     if (e.bailed) play('bail', { x: e.x, y: game.player.position.y + 0.4, z: e.z });
-    else if (v.mode !== 'cyclist') {
+    else if (v.mode !== 'cyclist' && v.mode !== 'scooter') {
       play('door-open', { x: v.x, y: v.y + 1, z: v.z });
       play('door-close', { x: v.x, y: v.y + 1, z: v.z, delay: 0.5 });
     }

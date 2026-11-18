@@ -1,4 +1,3 @@
-import { createBlips } from './blips.js';
 import { createPickups } from './pickups.js';
 import { createEconomy } from './economy.js';
 import { createActivities } from './activities.js';
@@ -926,7 +925,6 @@ function standIn(game, x, z, o) {
 function registerMissions(game) {
   if (game.sandbox) return;
   const places = createPlaces(game);
-  game.blips = createBlips(game);
   game.pickups = createPickups(game);
   game.stats = createStats(game);
   const markers = createMarkers(game);
