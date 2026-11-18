@@ -11,6 +11,9 @@ mrdoob: the same engine (three.js `WebGPURenderer` + TSL materials, traffic, ped
 with the city replaced by Auckland, generated from open data. The game layer is `js/game` (its API reference is the
 comment at the top of `js/game/index.js`).
 
+**Play it in the browser: <https://pengqianhan.github.io/slop-auckland/>** (needs WebGPU; `?sandbox` for the free-roam
+city without the game).
+
 ## Run it
 
 There is no build step. Serve the folder with any static file server and open it in a browser with WebGPU
@@ -131,6 +134,17 @@ hundred footprints and guessed from their size; outside the detailed area all he
 The vehicle models are the original project's, repainted: white cabs with a roof light (the company on their doors is
 invented), police cars in blue and yellow Battenburg checks, buses in AT Metro blue or the Link services' green, red,
 amber and teal, and black-on-white plates.
+
+## Project layout
+
+| Path | What it holds |
+| --- | --- |
+| `index.html`, `css/` | the page, the import map for three.js, the toolbar, title screen, HUD and menu styles |
+| `js/main.js` | boots the renderer, the city and the game (or the sandbox) |
+| `js/*.js` | the city engine: terrain, roads, buildings, houses, trees, landmarks, traffic, pedestrians, vehicles and their physics, lighting, post-processing, audio, cameras, quality and performance (`perf.js`) |
+| `js/game/` | the game: player, combat and the bat, wanted level and police, missions (`missions/` — story, steps, phone, stats), activities, economy and safehouses, pickups, radio, music and sound effects, HUD (`hud/` — radar, GPS, cards, tips), menus, saving |
+| `js/*-geodata*`, `js/region-*` | the generated city data (see below) |
+| `tools/` | Node scripts that fetch OpenStreetMap and LINZ data and build the files above; `tools/debug/` draws intermediate results |
 
 ## Rebuilding the data
 
