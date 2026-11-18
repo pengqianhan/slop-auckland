@@ -6,3 +6,4 @@ tools/data/
 tools/debug/*.png
 .DS_Store
 Thumbs.db
+.vscode

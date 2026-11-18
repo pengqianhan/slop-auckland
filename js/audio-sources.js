@@ -213,7 +213,7 @@ class CityAudioSources {
       } else {
         // Inactive bicycles stop updating and are silent, even if their stored speed is left over from riding.
         if (!player && entity.type === 'cyclist') continue;
-        if (entity.type === 'kiwi') continue; // (no engine: it flies in silence)
+        if (entity.type === 'kiwi' || entity.type === 'boat') continue; // (no engine: it flies, or sails, in silence)
         const kind = entity.type === 'car' ? 'sedan' : entity.type;
         const helicopter = kind === 'helicopter';
         const verticalSpeed = player && helicopter ? helicopterVerticalSpeed(entity) : 0;

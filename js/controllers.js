@@ -5,7 +5,9 @@ import {
   keepAshore,
   shoreDistance,
   isTypingInField,
-  blockAt
+  blockAt,
+  landingAt,
+  landingGround
 } from './city-config.js';
 import { terrainHeight, deckHeight } from './terrain.js';
 import { cityUniforms, createCarPaintMaterial, createContactShadowMaterial } from './tsl-materials.js';
@@ -28,8 +30,10 @@ import { buildKiwi, poseKiwi } from './kiwi.js';
 import { PersonCrowd, PersonRig } from './pedestrians.js';
 import { HEADLIGHTS, createVehicleHeadlight, placeVehicleHeadlight } from './vehicle-lights.js';
 import { polygonContact } from './building-collision.js';
+import { createSailboatEntity, stepSailboat, SAILBOAT } from './sailboat.js';
 
-// Player models, animation and movement for walking, driving, cycling and flying (a helicopter, and a kiwi).
+// Player models, animation and movement for walking, driving, cycling, flying (a helicopter, and a kiwi) and sailing
+// (a sailboat on the harbour: js/sailboat.js).
 
 // Everyone starts on Queen Street, looking down the valley to the harbour (city-config.js SPAWN: on the lane traffic
 // keeps to). Around the car: the pedestrian on the footpath beside it, the bicycle behind, the helicopter overhead.
@@ -206,7 +210,7 @@ class ThirdPersonControllerManager {
     this.scene = scene;
     this.colliders = colliders;
     this._colliderCells = null; // built on first use, see nearColliders()
-    this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter' | 'kiwi'
+    this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter' | 'kiwi' | 'boat'
     this._collisionListeners = [];
     // The game (js/game) sets gameMode: the one player character walks camera-relative (personControl, fed every
     // frame by game/player.js), the idle pedestrian no longer wanders, and parked vehicles stand still. Codes in
@@ -229,7 +233,8 @@ class ThirdPersonControllerManager {
       car: this.createCarEntity(),
       cyclist: this.createCyclistEntity(),
       helicopter: this.createHelicopterEntity(),
-      kiwi: this.createKiwiEntity()
+      kiwi: this.createKiwiEntity(),
+      boat: this.createBoatEntity()
     };
 
     Object.values(this.entities).forEach((ent) => {
@@ -462,7 +467,7 @@ class ThirdPersonControllerManager {
     const margin = heli ? 6000 : 0;
     const entity = this.getActiveEntity();
     // Conservative body cylinders, including the taxi's corners, bicycle wheels and helicopter tail/rotor.
-    const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], helicopter: [6.2, 3.2], kiwi: [1.0, 1.2] };
+    const body = { person: [0.48, 1.9], car: [2.4, 1.9], cyclist: [1.0, 1.9], helicopter: [6.2, 3.2], kiwi: [1.0, 1.2], boat: [SAILBOAT.halfL, 13] };
     const others = Object.values(this.entities).filter(e => e !== entity).map(e => ({
       x: e.position.x, z: e.position.z, radius: body[e.type][0],
       bottom: e.position.y - (e.type === 'helicopter' ? 0.7 : 0), top: e.position.y + body[e.type][1]
@@ -470,6 +475,8 @@ class ThirdPersonControllerManager {
     const cameraBack = Math.cos(0.09) * entity.chaseDistance;
     const cameraUp = entity.chaseHeight + Math.sin(0.09) * entity.chaseDistance * 0.85;
     const clampPoint = (px, pz) => {
+      // (ashore at a landing beyond the detailed city: Devonport, off a boat)
+      if (this.activeMode === 'person' && landingGround(px, pz, 1.2)) return { x: px, z: pz };
       pz = Math.max(ISLAND_BOUNDS.minZ + (heli ? -6000 : 30), Math.min(ISLAND_BOUNDS.maxZ + margin, pz));
       px = Math.max(ISLAND_BOUNDS.minX - margin, Math.min(ISLAND_BOUNDS.maxX + margin, px));
       if (!heli && shoreDistance(px, pz) < 8) return null; // in the water (the rings below look for the land nearby)
@@ -834,6 +841,14 @@ class ThirdPersonControllerManager {
   // =========================================================================
   // 4. HELICOPTER (3D LOFTED MANHATTAN SIGHTSEEING TWIN-TURBINE CHOPPER)
   // =========================================================================
+  // The sailboat (the game moors its own at the wharves and swaps the one sailed in with setEntity)
+  createBoatEntity() {
+    const e = createSailboatEntity({ paint: 0, x: 553.0, z: -704.3, heading: 1.25 });
+    e.mesh.name = 'PlayerSailboat';
+    this.scene.add(e.mesh);
+    return e;
+  }
+
   createHelicopterEntity() {
     const root = new THREE.Group();
     root.name = 'PlayerHelicopter';
@@ -1023,6 +1038,12 @@ class ThirdPersonControllerManager {
     e.groundRoll = (e.groundRoll || 0) + (roll - (e.groundRoll || 0)) * k;
   }
 
+  /** More static colliders (loaded later: the buildings at the landings); the cells are indexed afresh */
+  addColliders(list) {
+    for (const c of list) this.colliders.push(c);
+    this._colliderCells = null;
+  }
+
   // Static colliders within `r` of (x, z), kept in their original order and indexed once into 48 m cells.
   nearColliders(x, z, r) {
     const CELL = 48;
@@ -1072,6 +1093,17 @@ class ThirdPersonControllerManager {
     } else if (entity && this.isOnDeck(pos.x, pos.z, entity.position.y)) {
       // on a bridge: over the water or a gully, and (on the Harbour Bridge) out past the detailed city's edge
       entity._onDeck = true;
+    } else if ((!entity || entity.type === 'person') && (landingAt(pos.x, pos.z) || (entity && landingAt(entity.prevX, entity.prevZ)))) {
+      // ashore at a landing beyond the detailed city (Devonport): the region's land, kept off its water and inside it
+      if (entity) entity._onDeck = false;
+      if (!landingGround(pos.x, pos.z, 1.2) && entity && Number.isFinite(entity.prevX)) {
+        if (landingGround(pos.x, entity.prevZ, 1.2)) pos.z = entity.prevZ;
+        else if (landingGround(entity.prevX, pos.z, 1.2)) pos.x = entity.prevX;
+        else if (landingGround(entity.prevX, entity.prevZ, 1.2)) {
+          pos.x = entity.prevX;
+          pos.z = entity.prevZ;
+        }
+      }
     } else {
       const wasOnDeck = entity && entity._onDeck;
       if (entity) entity._onDeck = false;
@@ -1281,6 +1313,8 @@ class ThirdPersonControllerManager {
       this.updateHelicopter(dt, elapsed);
     } else if (this.activeMode === 'kiwi') {
       this.updateKiwi(dt);
+    } else if (this.activeMode === 'boat') {
+      this.updateBoat(dt, elapsed);
     }
     this.animateKiwi(dt, elapsed);
 
@@ -1713,6 +1747,19 @@ class ThirdPersonControllerManager {
     h.tiltPivot.rotation.x = h.pitchAngle;
     h.tiltPivot.rotation.z = h.rollAngle;
     h.tiltPivot.position.y = Math.sin(elapsed * 2.6) * 0.18;
+  }
+
+  // The sailboat: forward trims the sails in, back runs the outboard astern, left / right the tiller (js/sailboat.js)
+  updateBoat(dt, elapsed) {
+    const b = this.entities.boat;
+    const throttle = (this.keys.forward || 0) - (this.keys.backward || 0);
+    const steer = (this.keys.left || 0) - (this.keys.right || 0);
+    stepSailboat(b, throttle, steer, dt, elapsed);
+    // (a knock on a wharf: once, not every frame she scrapes along it)
+    if (b.bump > 1.2 && elapsed - (b._bumpAt ?? -Infinity) > 0.8) {
+      b._bumpAt = elapsed;
+      this.reportCollision(b, groundCollider, 'building', b.position.x, b.position.y + 0.8, b.position.z, 0, 1, 0, b.bump);
+    }
   }
 
   // The kiwi flies like the helicopter is flown (forward & back, turn, up & down), only smaller, slower and nimbler:

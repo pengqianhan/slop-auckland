@@ -304,7 +304,7 @@ class CameraSystem {
           entity.position.z - Math.cos(totalYaw) * horizDist
         );
 
-        const lookUpBias = entity.type === 'helicopter' ? 0.2 : entity.type === 'kiwi' ? 0.45 : (entity.type === 'car' ? 0.52 : 1.55);
+        const lookUpBias = entity.type === 'helicopter' ? 0.2 : entity.type === 'kiwi' ? 0.45 : entity.type === 'boat' ? 1.2 : (entity.type === 'car' ? 0.52 : 1.55);
         desiredLook.set(
           entity.position.x + Math.sin(entity.heading) * 5.2,
           entity.position.y + entity.cameraTargetOffset.y + lookUpBias,
@@ -314,9 +314,10 @@ class CameraSystem {
       }
 
       case 'action': {
-        const sideOffset = entity.type === 'car' ? 2.65 : (entity.type === 'helicopter' ? 4.2 : entity.type === 'kiwi' ? 1.5 : 0.95);
-        const backDist = (entity.type === 'car' ? 3.6 : (entity.type === 'helicopter' ? 8.5 : 2.8)) + speedLag;
-        const lowY = entity.type === 'helicopter' ? entity.position.y + 1.2 : entity.position.y + (entity.type === 'kiwi' ? 0.5 : 0.92);
+        const boat = entity.type === 'boat';
+        const sideOffset = entity.type === 'car' ? 2.65 : (entity.type === 'helicopter' ? 4.2 : entity.type === 'kiwi' ? 1.5 : boat ? 3.4 : 0.95);
+        const backDist = (entity.type === 'car' ? 3.6 : (entity.type === 'helicopter' ? 8.5 : boat ? 9.5 : 2.8)) + speedLag;
+        const lowY = entity.type === 'helicopter' ? entity.position.y + 1.2 : entity.position.y + (entity.type === 'kiwi' ? 0.5 : boat ? 2.2 : 0.92);
 
         desiredPos.set(
           entity.position.x - Math.sin(entity.heading) * backDist + Math.cos(entity.heading) * sideOffset,
@@ -343,6 +344,10 @@ class CameraSystem {
         } else if (entity.type === 'helicopter') {
           fwdOffset = 1.65;
           eyeY = 1.65;
+        } else if (entity.type === 'boat') {
+          // (at the helm, in the cockpit)
+          fwdOffset = -3.0;
+          eyeY = 2.55;
         } else if (entity.type === 'kiwi') {
           // (from the tip of its bill)
           fwdOffset = 1.35;

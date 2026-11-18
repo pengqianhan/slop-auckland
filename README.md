@@ -53,7 +53,12 @@ three.js r187 is loaded from jsDelivr through the import map in `index.html`. Th
 - **HUD**: radar with GPS routes and blips, wanted stars and an arrest meter, health / armour / stamina, money, fists
   or bat in hand, a focus dot, speedometer, mission timer and objective, subtitles, phone-style notifications,
   first-time tips, pause menu with the map (click to set a waypoint), jobs, stats, settings and controls.
-- **Radio**: procedural stations in any car or the helicopter.
+- **Sailing** (Auckland is the City of Sails): three yachts lie alongside Queens Wharf by the Ferry Building. Step
+  aboard from the quay and sail them anywhere on the Waitematā among a dozen other yachts out for a sail — fastest
+  across the wind, no good straight into it (the HUD shows knots and the point of sail). Cross the harbour to
+  **Devonport**, bring her alongside the seawall by the wharf and step ashore to walk the village and the waterfront
+  (low-detail suburbs, out beyond the detailed city); another yacht waits there for the trip back.
+- **Radio**: procedural stations in any car, the helicopter or a sailboat.
 
 ## Controls
 
@@ -68,6 +73,7 @@ three.js r187 is loaded from jsDelivr through the import map in `index.html`. Th
 | Interact (shops, safehouses, retry, taxi duty) | `G` | B | — |
 | Drive / steer | `W` `S` / `A` `D` | RT LT / left stick | left joystick |
 | Fly the helicopter | `W` `A` `S` `D`, `Space` climb, `Q` descend | left stick, RT climb, LT descend | left joystick |
+| Sail (`F` aboard / ashore) | `W` trim the sails in, `S` outboard astern, `A` `D` the tiller | RT LT / left stick | left joystick |
 | Horn / radio station | `B` / `,` `.` | — / LB RB (in a vehicle) | — |
 | Phone | `T` | D-pad → | — |
 | Map / pause | `M` / `Esc` or `P` | Back / Start | tap the radar / ❚❚ |
@@ -141,8 +147,8 @@ amber and teal, and black-on-white plates.
 | --- | --- |
 | `index.html`, `css/` | the page, the import map for three.js, the toolbar, title screen, HUD and menu styles |
 | `js/main.js` | boots the renderer, the city and the game (or the sandbox) |
-| `js/*.js` | the city engine: terrain, roads, buildings, houses, trees, landmarks, traffic, pedestrians, vehicles and their physics, lighting, post-processing, audio, cameras, quality and performance (`perf.js`) |
-| `js/game/` | the game: player, combat and the bat, wanted level and police, missions (`missions/` — story, steps, phone, stats), activities, economy and safehouses, pickups, radio, music and sound effects, HUD (`hud/` — radar, GPS, cards, tips), menus, saving |
+| `js/*.js` | the city engine: terrain, roads, buildings, houses, trees, landmarks, traffic, pedestrians, vehicles and their physics, the sailboats (`sailboat.js`), lighting, post-processing, audio, cameras, quality and performance (`perf.js`) |
+| `js/game/` | the game: player, combat and the bat, wanted level and police, missions (`missions/` — story, steps, phone, stats), activities, economy and safehouses, pickups, sailing (`sailing.js` — the wind, the yachts on the harbour), radio, music and sound effects, HUD (`hud/` — radar, GPS, cards, tips), menus, saving |
 | `js/*-geodata*`, `js/region-*` | the generated city data (see below) |
 | `tools/` | Node scripts that fetch OpenStreetMap and LINZ data and build the files above; `tools/debug/` draws intermediate results |
 

@@ -154,12 +154,14 @@ async function initApp() {
   // player character who walks up to vehicles and gets in
   const sandbox = new URLSearchParams(location.search).has('sandbox');
   const controllerManager = new ThirdPersonControllerManager(scene, allColliders);
+  surroundings.whenColliders((list) => controllerManager.addColliders(list)); // (Devonport's buildings, when loaded)
   // Reuse teleport placement so saved players return at rest, close to their last positions (the game keeps its own
   // save, see js/game/save.js)
   try {
     const saved = sandbox ? JSON.parse(localStorage.getItem('akl-player-state')) : null;
     if (saved?.version === 2) {
       for (const mode of Object.keys(controllerManager.entities)) {
+        if (mode === 'boat') continue; // (the game's: it stays on the water)
         const p = saved.entities?.[mode];
         if (!p || ![p.x, p.y, p.z, p.heading].every(Number.isFinite)) continue;
         controllerManager.setMode(mode);

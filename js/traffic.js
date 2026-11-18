@@ -2170,7 +2170,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     refreshNear();
     updateView(camera);
 
-    player.active = Boolean(playerEntity && activeMode !== 'helicopter' && activeMode !== 'kiwi' &&
+    player.active = Boolean(playerEntity && activeMode !== 'helicopter' && activeMode !== 'kiwi' && activeMode !== 'boat' &&
       playerEntity.position.y - surfaceHeight(playerEntity.position.x, playerEntity.position.z, playerEntity.position.y) < 2.6);
     if (playerEntity) {
       const heading = playerEntity.heading || 0;
@@ -2639,7 +2639,7 @@ function createHighwayTraffic(scene, lanes) {
 
   function update(dt, camera, entity, mode) {
     // 1. Car following (IDM) in every lane, the player counting as a leader
-    const pl = entity && mode !== 'helicopter' && mode !== 'kiwi' ? {
+    const pl = entity && mode !== 'helicopter' && mode !== 'kiwi' && mode !== 'boat' ? {
       x: entity.position.x, y: entity.position.y, z: entity.position.z,
       vx: Math.sin(entity.heading || 0) * (entity.speed || 0) + (entity.vx || 0),
       vz: Math.cos(entity.heading || 0) * (entity.speed || 0) + (entity.vz || 0)

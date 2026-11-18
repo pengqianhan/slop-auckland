@@ -165,7 +165,7 @@ export function createRadio(game, audio) {
   };
   let policeOn = true;
 
-  const radioVehicle = (v) => v && !v.hidden && (v.mode === 'car' || v.mode === 'helicopter');
+  const radioVehicle = (v) => v && !v.hidden && (v.mode === 'car' || v.mode === 'helicopter' || v.mode === 'boat');
   function police() {
     return !!(vehicle && vehicle.police);
   }

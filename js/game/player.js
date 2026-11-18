@@ -336,10 +336,14 @@ function createPlayer(game, { controllerManager, cameraSystem, fx }) {
 
   // Save: where the player is (on foot, next to whatever they were in), their health, armour and money
   game.save.register('player', {
-    get: () => ({
-      x: person.position.x, y: person.position.y, z: person.position.z, heading: person.heading,
-      health: player.alive ? player.health : player.maxHealth, armor: player.armor, money: player.money
-    }),
+    get: () => {
+      // (out sailing: where they stepped aboard, so that a reload finds them ashore)
+      const at = (player.vehicle?.mode === 'boat' && game.vehicles?.lastShore) || person.position;
+      return {
+        x: at.x, y: at.y, z: at.z, heading: person.heading,
+        health: player.alive ? player.health : player.maxHealth, armor: player.armor, money: player.money
+      };
+    },
     set: (data) => {
       if (!data || ![data.x, data.z].every(Number.isFinite)) return;
       cm.setMode('person');

@@ -44,11 +44,15 @@
 //   and the police keep the bat; a hospital trip keeps it). A vehicle hit takes 6.5 health per m/s over 2.5 m/s.
 //
 // VEHICLES (vehicles.js) game.vehicles ------------------------------------------------------------------------------
-//   WorldVehicle: { id, type: 'world', kind (taxi sedan suv minivan pickup van bicycle helicopter), mode ('car' |
-//     'cyclist' | 'helicopter'), label, police, hero, health/maxHealth, state ('ok'|'smoking'|'wrecked'),
+//   WorldVehicle: { id, type: 'world', kind (taxi sedan suv minivan pickup van bicycle helicopter sailboat), mode ('car' |
+//     'cyclist' | 'helicopter' | 'boat'), label, police, hero, health/maxHealth, state ('ok'|'smoking'|'wrecked'),
 //     driver ('player'|'ai'|null), locked, persistent, hidden, x y z heading speed vx vz (synced each frame), halfW
 //     halfL height mass, entity (physics: position Vector3, heading, speed...), record (traffic car drawn for it) }
-//   list()  current  busy  heroes { taxi, bicycle, helicopter }  KINDS
+//   list()  current  busy  heroes { taxi, bicycle, helicopter, boats[] }  KINDS  lastShore (where the player stepped aboard)
+//   Sailboats (js/sailboat.js): moored at Queens Wharf (and Devonport); boarded from the quay within 13 m, stepped off
+//   onto the nearest wharf / shore within 20 m (or a city-config.js LANDINGS' land); tied up where left, no damage.
+// SAILING (sailing.js) game.sailing --- { wind (WIND: dir, strength), fleet [{ entity, route, wp }] }: the harbour's
+//   wind and the yachts sailing loops of it; radar blips for the berths and the Devonport landing.
 //   nearest(x, z, maxDist, filter?)  findCandidate() -> { vehicle | record (traffic car to steal), distance, verb }
 //   enter(v, { instant })  exit({ bail, eject })  toggle() (what F does)
 //   spawn(kind | 'police' | 'police-suv', x, z, heading, { paint, police, persistent, locked, label, health }) -> v|null
@@ -138,6 +142,7 @@ import { registerWeapons } from './weapons.js';
 import { registerPolice } from './police.js';
 import { registerMissions } from './missions.js';
 import { registerAudio } from './audio.js';
+import { registerSailing } from './sailing.js';
 // (the HUD needs no line here: it is game.ui, js/game/ui.js, created by createGame)
 // --------------------------------------------------------------------------------------------------------------------
 
@@ -204,6 +209,7 @@ function createGame({ scene, renderer, controllerManager, cameraSystem, trafficS
   registerWeapons(game);
   registerPolice(game);
   registerMissions(game);
+  registerSailing(game);
   registerAudio(game);
   // (HUD: game.ui, see above)
   // ---------------------------------------------------------------------------------------------------------------

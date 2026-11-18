@@ -139,6 +139,28 @@ function keepAshore(pos, margin = 8) {
 
 const ISLAND_BOUNDS = { minX: RX0, maxX: RX1, minZ: RZ0, maxZ: RZ1, sidewalkHeight: 0.22, waterLevel: -2.2 };
 
+// Landings: places out beyond the detailed city where the player can step ashore off a boat (js/game/vehicles.js) and
+// walk about on the region's land (its 32 m terrain, its plain buildings, solid there), within `r` of the centre.
+// berth: where a boat is moored (on the water, alongside); ashore: the ground beside it.
+const LANDINGS = [
+  {
+    id: 'devonport', name: 'Devonport', ...LL(174.79610, -36.83000), r: 720,
+    // (the ferry wharf is a solid block on the region's map: the boat ties up off the seawall just east of it)
+    berth: { x: 3088, z: -1729.5, heading: 1.45 }, ashore: { x: 3088, z: -1739 }
+  }
+];
+/** The landing (x, z) is in, if any (outside the detailed city, near one of LANDINGS) */
+function landingAt(x, z) {
+  if (x >= RX0 && x <= RX1 && z >= RZ0 && z <= RZ1) return null;
+  for (const l of LANDINGS) if (Math.hypot(x - l.x, z - l.z) < l.r) return l;
+  return null;
+}
+/** Can a person stand at (x, z) on a landing's land, `margin` m from its water? */
+function landingGround(x, z, margin = 1.5) {
+  if (!landingAt(x, z) || !isRegionLand(x, z)) return false;
+  return margin <= 0 || (isRegionLand(x + margin, z) && isRegionLand(x - margin, z) && isRegionLand(x, z + margin) && isRegionLand(x, z - margin));
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Streets: the centreline graph's links as named roads (maps, labels & lookups)
 //   cls: 0 local street, 1 collector, 2 main road, 3 arterial
@@ -458,6 +480,9 @@ export {
   REGION_LAND,
   isLand,
   isRegionLand,
+  LANDINGS,
+  landingAt,
+  landingGround,
   shoreDistance,
   keepAshore,
   ISLAND_BOUNDS,

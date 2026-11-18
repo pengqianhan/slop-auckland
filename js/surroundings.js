@@ -201,15 +201,21 @@ function buildMotorways(group, roadPaint) {
 }
 
 function buildSurroundings(scene, { roadPaint, coverTexture = null } = {}) {
+  // (the buildings at the landings are solid once they have loaded: whenColliders(fn) hands them over)
+  let pending = null, take = null;
   const group = new THREE.Group();
   group.name = 'AucklandSurroundings';
   buildRegionLand(group, coverTexture);
   const highwayLanes = buildMotorways(group, roadPaint);
-  const buildings = buildRegionBuildings(group);
+  const buildings = buildRegionBuildings(group, { onColliders: (list) => (take ? take(list) : (pending = list)) });
   scene.add(group);
   void isLand;
   void terrainHeight;
-  return { group, colliders: [], highwayLanes, update: (cameraPos) => buildings.update(cameraPos), setReach: (share) => buildings.setReach(share) };
+  const whenColliders = (fn) => {
+    take = fn;
+    if (pending) fn(pending), (pending = null);
+  };
+  return { group, colliders: [], whenColliders, highwayLanes, update: (cameraPos) => buildings.update(cameraPos), setReach: (share) => buildings.setReach(share) };
 }
 
 export { buildSurroundings };

@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { attribute, color, float, vec2, vec3, floor, fract, sin, dot, step, mix, smoothstep, positionWorld } from 'three/tsl';
 import { regionHeight } from './terrain.js';
+import { LANDINGS } from './city-config.js';
 import { cityUniforms } from './tsl-materials.js';
 
 // The suburbs around the detailed city: some ninety thousand buildings as plain boxes, the houses under hipped roofs,
@@ -75,12 +76,14 @@ async function loadRecords() {
   return { view, n };
 }
 
-function buildRegionBuildings(parent) {
+function buildRegionBuildings(parent, { onColliders = null } = {}) {
   const group = new THREE.Group();
   group.name = 'RegionBuildings';
   parent.add(group);
   const cells = [];
   loadRecords().then(({ view, n }) => {
+    // the buildings where people can walk (the landings, city-config.js LANDINGS) are solid: oriented boxes
+    const colliders = [];
     const buckets = new Map();
     for (let i = 0; i < n; i++) {
       const o = 8 + i * 8;
@@ -96,7 +99,15 @@ function buildRegionBuildings(parent) {
         th += Math.PI / 2;
       }
       (a * d < 330 && high < 7.5 ? b.house : b.block).push(x, z, a, d, th, high);
+      if (LANDINGS.some((l) => Math.hypot(x - l.x, z - l.z) < l.r + 40)) {
+        const ground = regionHeight(x, z) - 1;
+        const ex = (Math.abs(Math.cos(th)) * a + Math.abs(Math.sin(th)) * d) / 2, ez = (Math.abs(Math.sin(th)) * a + Math.abs(Math.cos(th)) * d) / 2;
+        // (the mesh turns by -th about y: its local x runs along (cos th, sin th))
+        colliders.push({ minX: x - ex, maxX: x + ex, minZ: z - ez, maxZ: z + ez, minY: ground, maxY: ground + 1 + high + 1.5,
+          obb: { cx: x, cz: z, hx: a / 2, hz: d / 2, cs: Math.cos(th), sn: -Math.sin(th) } });
+      }
     }
+    if (colliders.length && onColliders) onColliders(colliders);
     const material = createMaterial();
     const geometries = { house: unitGeometry(true), block: unitGeometry(false) };
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);

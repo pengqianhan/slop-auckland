@@ -1,7 +1,8 @@
 import * as THREE from 'three/webgpu';
 import { vehicleContact, sweptVehicleContact, resolveVehicleContact } from '../vehicle-physics.js';
 import { terrainHeight } from '../terrain.js';
-import { ISLAND_BOUNDS, LL, shoreDistance } from '../city-config.js';
+import { ISLAND_BOUNDS, LL, shoreDistance, LANDINGS, landingAt, landingGround } from '../city-config.js';
+import { createSailboatEntity, stepSailboat, poseSailboat } from '../sailboat.js';
 
 // The vehicle layer: every vehicle the player can get into is a "world vehicle". The hero taxi, bicycle and
 // helicopter are the controllers' own entities (their own meshes); any other car is a traffic car record taken off
@@ -13,6 +14,9 @@ import { ISLAND_BOUNDS, LL, shoreDistance } from '../city-config.js';
 // smoke, and at nothing left the engine dies — a wreck: stalled, battered, smoking hard for a while, undrivable (no
 // fire, no explosion; this is a caper). Traffic cars take damage the same way while they drive; one that is wrecked is
 // abandoned by its driver and becomes a world vehicle.
+// Sailboats (mode 'boat') are moored at the wharves: the player steps aboard from the quay, sails off (controllers.js
+// 'boat', js/sailboat.js), and steps ashore wherever she can be brought alongside — a wharf in the city, or the
+// seawall at Devonport (city-config.js LANDINGS). Left at a quay she is tied up; she takes no damage.
 
 const KINDS = {
   taxi: { mode: 'car', label: 'Taxi', halfW: 0.86, halfL: 2.18, height: 1.55, mass: 1600, chase: 1, lift: 0 },
@@ -22,7 +26,8 @@ const KINDS = {
   pickup: { mode: 'car', label: 'Ute', halfW: 0.96, halfL: 2.78, height: 1.85, mass: 2400, chase: 1.12, lift: 0.22 },
   van: { mode: 'car', label: 'Van', halfW: 0.95, halfL: 2.88, height: 2.45, mass: 2700, chase: 1.2, lift: 0.55 },
   bicycle: { mode: 'cyclist', label: 'Bicycle', halfW: 0.32, halfL: 0.9, height: 1.15, mass: 20 },
-  helicopter: { mode: 'helicopter', label: 'Helicopter', halfW: 1.25, halfL: 4.3, height: 3.1, mass: 3000 }
+  helicopter: { mode: 'helicopter', label: 'Helicopter', halfW: 1.25, halfL: 4.3, height: 3.1, mass: 3000 },
+  sailboat: { mode: 'boat', label: 'Sailboat', halfW: 1.35, halfL: 4.6, height: 13, mass: 3200 }
 };
 const CAR_KINDS = ['taxi', 'sedan', 'suv', 'minivan', 'pickup', 'van'];
 // Health thresholds (out of 100): light smoke, heavy smoke, wrecked (the engine dies)
@@ -36,6 +41,17 @@ const JACK_TOP_SPEED = 11;
 const WRECK_DARKEN = 0.55; // a wreck's paint: battered and grimy (put back when it is removed)
 // The hero helicopter's home: the open paving of Aotea Square, by the Town Hall (lon, lat)
 const HELIPAD = LL(174.76330, -36.85250);
+// The sailboats' berths: three side by side off the east side of Queens Wharf, by the Ferry Building, sterns to the
+// quay and bows out into the open water between the wharves (each with a clear run out, and across the usual
+// north-easterly: she gathers way at once), and one off the seawall at Devonport
+const BERTHS = [
+  { x: 553.0, z: -704.3, heading: 1.25 },
+  { x: 556.3, z: -714.5, heading: 1.25 },
+  { x: 559.0, z: -724.3, heading: 1.25 },
+  ...LANDINGS.map((l) => l.berth)
+];
+const BOAT_REACH = 13; // m from the quay to a boat's side (people keep a few metres back from the edge)
+const BOAT_ASHORE = 20; // m from a boat to the ground she can be left from
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const wrap = (a) => a - Math.round(a / (Math.PI * 2)) * Math.PI * 2;
@@ -126,6 +142,19 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
   heliEntity.rotorSpeed = 0;
   heliEntity.verticalSpeed = heliEntity.speed = 0;
   const heroHeli = makeVehicle('helicopter', heliEntity, null, { hero: true, persistent: true, home: { x: HELIPAD.x, z: HELIPAD.z, heading: heliEntity.heading } });
+  // the sailboats at their berths, sails furled (the first is the controllers' own)
+  const heroBoats = BERTHS.map((b, i) => {
+    const e = i === 0 ? cm.entities.boat : createSailboatEntity({ paint: i, x: b.x, z: b.z, heading: b.heading });
+    if (i > 0) cm.scene.add(e.mesh);
+    e.position.set(b.x, ISLAND_BOUNDS.waterLevel, b.z);
+    e.heading = b.heading;
+    e.moored = true;
+    e.sailsUp = false;
+    const v = makeVehicle('sailboat', e, null, { hero: true, persistent: true, home: { x: b.x, z: b.z, heading: b.heading } });
+    v.invulnerable = true;
+    return v;
+  });
+  let lastShore = null; // where the player stepped aboard from (the save keeps them ashore)
   // (the kiwi belongs to the sandbox)
   cm.entities.kiwi.mesh.visible = false;
   for (const v of [heroTaxi, heroBike, heroHeli]) v.awake = false;
@@ -166,10 +195,12 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     candidate.distance = Infinity;
     const p = person.position;
     for (const v of vehicles) {
-      if (v.hidden || v.locked || v.state === 'wrecked' || v.driver === 'ai' || Math.abs(v.entity.position.y - p.y) > (v.mode === 'helicopter' ? 3 : 2)) continue;
+      const boat = v.mode === 'boat';
+      if (v.hidden || v.locked || v.state === 'wrecked' || v.driver === 'ai' || Math.abs(v.entity.position.y - p.y) > (v.mode === 'helicopter' ? 3 : boat ? 6 : 2)) continue;
       const e = v.entity;
+      if (boat && Math.abs(e.speed) > 2) continue;
       const d = bodyDistance(p.x, p.z, e.position.x, e.position.z, e.heading, v.halfW, v.halfL);
-      if (d < ENTER_REACH && d < candidate.distance) {
+      if (d < (boat ? BOAT_REACH : ENTER_REACH) && d < candidate.distance && (!boat || canStepAboard(v, d))) {
         candidate.vehicle = v;
         candidate.distance = d;
       }
@@ -187,8 +218,49 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       }
     }
     const v = candidate.vehicle;
-    candidate.verb = candidate.record ? 'Steal' : !v ? '' : v.mode === 'cyclist' ? 'Ride' : v.mode === 'helicopter' ? 'Fly' : 'Enter';
+    candidate.verb = candidate.record ? 'Steal' : !v ? '' : v.mode === 'cyclist' ? 'Ride' : v.mode === 'helicopter' ? 'Fly' : v.mode === 'boat' ? 'Sail' : 'Enter';
     return candidate;
+  }
+
+  // A boat within reach of the quay: nothing but water between her and the player (not a boat seen across a wharf)
+  function canStepAboard(v, d) {
+    const p = person.position, e = v.entity;
+    const dx = e.position.x - p.x, dz = e.position.z - p.z;
+    const len = Math.hypot(dx, dz) || 1;
+    // from the player towards her: land, then water up to her side (land again after water: a wharf in between)
+    let wet = false;
+    for (let t = 1; t < len - v.halfW; t += 1.5) {
+      const x = p.x + (dx / len) * t, z = p.z + (dz / len) * t;
+      const land = landingAt(x, z) ? landingGround(x, z, 0) : shoreDistance(x, z) > 0;
+      if (!land) wet = true;
+      else if (wet) return false;
+    }
+    void d;
+    return true;
+  }
+
+  // Ground to step ashore onto from a boat: the nearest clear spot on a wharf or the shore (or on a landing's land)
+  const ashore = { x: 0, y: 0, z: 0 };
+  function findAshore(e) {
+    let best = null, bd = Infinity;
+    for (let r = 3; r <= BOAT_ASHORE; r += 1.5) {
+      const n = Math.max(12, Math.round(r * 2.5));
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const x = e.position.x + Math.sin(a) * r, z = e.position.z + Math.cos(a) * r;
+        const landing = landingAt(x, z);
+        if (landing ? !landingGround(x, z, 1.5) : shoreDistance(x, z) < 8.3 || x < ISLAND_BOUNDS.minX + 3 || x > ISLAND_BOUNDS.maxX - 3 || z < ISLAND_BOUNDS.minZ + 3 || z > ISLAND_BOUNDS.maxZ - 3) continue;
+        const y = world.groundHeight(x, z, 60);
+        if (!cm.isClear(x, z, y, 0.45)) continue;
+        if (r < bd) {
+          bd = r;
+          best = ashore;
+          ashore.x = x; ashore.y = y; ashore.z = z;
+        }
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   // =================================================================================================================
@@ -229,6 +301,12 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       if (cm.entities.car !== v.entity && cm.entities.car === taxiEntity) setTaxiLights(false);
       cm.setEntity('car', v.entity);
     }
+    if (v.mode === 'boat') {
+      lastShore = { x: person.position.x, y: person.position.y, z: person.position.z };
+      cm.setEntity('boat', v.entity);
+      v.entity.moored = false;
+      v.entity.sailsUp = true;
+    }
     cm.resetInput();
     cm.setMode(v.mode);
     v.driver = 'player';
@@ -261,7 +339,8 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
   const EXITS = {
     car: (hw, hl) => [[-(hw + 0.6), 0.35], [hw + 0.6, 0.35], [-(hw + 0.6), -1.2], [hw + 0.6, -1.2], [0, -(hl + 0.8)], [0, hl + 0.8]],
     cyclist: () => [[-0.75, 0], [0.75, 0], [0, -1.4], [0, 1.4]],
-    helicopter: () => [[-1.8, 0.9], [1.8, 0.9], [-1.8, -1.5], [1.8, -1.5], [0, 3.4]]
+    helicopter: () => [[-1.8, 0.9], [1.8, 0.9], [-1.8, -1.5], [1.8, -1.5], [0, 3.4]],
+    boat: () => [[-2.2, 0], [2.2, 0], [0, -5.4]]
   };
 
   function clearForPerson(x, z, y, airborne) {
@@ -294,7 +373,15 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     const airborne = v.mode === 'helicopter' && e.position.y - Math.max(terrainHeight(e.position.x, e.position.z), ISLAND_BOUNDS.waterLevel) > 2;
     const offsets = EXITS[v.mode](v.halfW, v.halfL);
     let px = NaN, pz = NaN, py = 0;
-    for (const [lx, lz] of offsets) {
+    // off a boat: onto the quay (she's tied up there, sails furled)
+    const shore = v.mode === 'boat' ? findAshore(e) : null;
+    if (shore) {
+      px = shore.x; pz = shore.z; py = shore.y;
+      e.moored = true;
+      e.speed = 0;
+    }
+    if (v.mode === 'boat') e.sailsUp = false;
+    for (const [lx, lz] of shore ? [] : offsets) {
       const x = e.position.x + lx * c + lz * s;
       const z = e.position.z - lx * s + lz * c;
       const y = airborne ? e.position.y + 0.3 : world.groundHeight(x, z, e.position.y + 1);
@@ -320,6 +407,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     if (v.mode === 'cyclist') e.riderless = true;
     if (v.mode === 'car' && e === taxiEntity) setTaxiLights(false);
     e.carState && (e.carState.value.x = e.carState.value.w = 0);
+    if (v.mode === 'boat') lastShore = null;
 
     person.position.set(px, py, pz);
     person.prevX = px;
@@ -357,6 +445,11 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       const speed = Math.abs(current.entity.speed || 0);
       if (current.mode === 'helicopter') return exit();
       if (current.mode === 'cyclist') return exit({ bail: speed > 5 });
+      if (current.mode === 'boat') {
+        if (speed > 4.5) return notice('Slow her down first (hold S / LT to brake), then step ashore.'), false;
+        if (!findAshore(current.entity)) return notice('Bring her alongside a wharf or the shore to step off.'), false;
+        return exit();
+      }
       if (speed < 2.5) return exit();
       if (speed < 14) {
         action = { type: 'stop', t: 0 };
@@ -366,7 +459,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     }
     if (action) return false;
     const cand = findCandidate();
-    if (cand.vehicle) return enter(cand.vehicle);
+    if (cand.vehicle) return enter(cand.vehicle, { instant: cand.vehicle.mode === 'boat' });
     if (cand.record) {
       startJack(cand.record);
       return true;
@@ -557,9 +650,15 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     stopEffects(v);
     const e = v.entity;
     const h = v.home;
-    e.position.set(h.x, v.mode === 'helicopter' ? padY : world.groundHeight(h.x, h.z), h.z);
+    e.position.set(h.x, v.mode === 'helicopter' ? padY : v.mode === 'boat' ? ISLAND_BOUNDS.waterLevel : world.groundHeight(h.x, h.z), h.z);
     e.heading = h.heading;
     e.speed = e.vx = e.vz = e.angularVel = 0;
+    if (v.mode === 'boat') {
+      e.moored = true;
+      e.sailsUp = false;
+      e.sailShow = 0;
+      poseSailboat(e, 0.016, game.time);
+    }
     if (v.mode === 'helicopter') {
       e.verticalSpeed = 0;
       e.rotorSpeed = 0;
@@ -570,7 +669,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     v.state = 'ok';
     v.hidden = false;
     v.respawnPending = false;
-    v.awake = false;
+    v.awake = v.mode === 'boat';
     e.mesh.visible = true;
   }
 
@@ -599,7 +698,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     if (!v || v.hidden || !(amount > 0) || v.state === 'wrecked') return;
     const p = v.entity.position;
     emitDamage('vehicle:hit', v, amount, v.health, v.state, opts, p.x, p.y + 0.8, p.z);
-    if (v.mode === 'cyclist' || v.invulnerable) return; // (a bicycle takes knocks, not damage)
+    if (v.mode === 'cyclist' || v.mode === 'boat' || v.invulnerable) return; // (a bicycle or a boat takes knocks, not damage)
     v.health -= amount;
     v.lastHitBy = opts?.source ?? null;
     v.lastHitByPlayer = opts?.byPlayer ?? opts?.source === 'player';
@@ -871,7 +970,7 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     if (current || person.hidden) return;
     const p = person.position;
     for (const v of vehicles) {
-      if (v.hidden) continue;
+      if (v.hidden || v.mode === 'boat') continue;
       const e = v.entity;
       if (Math.abs(e.position.y - p.y) > (v.mode === 'helicopter' ? 3.2 : 1.8)) continue;
       const dx = p.x - e.position.x, dz = p.z - e.position.z;
@@ -991,6 +1090,16 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       e.tiltPivot.rotation.z *= Math.exp(-dt * 2);
       e.tiltPivot.position.y = 0;
       if (e.position.y <= floor + 0.01 && Math.abs(e.speed) < 0.05 && e.rotorSpeed <= 0) v.awake = false;
+    } else if (v.mode === 'boat') {
+      // tied up: she rides the swell where she was left; cast off (left at sea), she drifts, slowing, downwind
+      if (e.moored) {
+        e.speed = 0;
+        e.turnRate = 0;
+        e.power = 0;
+        poseSailboat(e, dt, game.time);
+      } else {
+        stepSailboat(e, 0, 0, dt, game.time);
+      }
     } else if (v.mode === 'cyclist') {
       e.speed *= Math.exp(-dt * 2.5);
       e.position.x += Math.sin(e.heading) * e.speed * dt;
@@ -1065,6 +1174,15 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
 
   function updateHeroes() {
     const p = cm.getActiveEntity().position;
+    // a sailboat left somewhere else for a few minutes, out of sight, goes back to her berth (unless it's taken)
+    for (const v of heroBoats) {
+      if (v === current) continue;
+      const e = v.entity, h = v.home;
+      if (Math.hypot(e.position.x - h.x, e.position.z - h.z) < 6 || game.time - v.lastUsed < 180) continue;
+      if (Math.hypot(e.position.x - p.x, e.position.z - p.z) < 500 || Math.hypot(h.x - p.x, h.z - p.z) < 500) continue;
+      if (heroBoats.some((o) => o !== v && Math.hypot(o.entity.position.x - h.x, o.entity.position.z - h.z) < 10)) continue;
+      sendHome(v);
+    }
     for (const v of [heroTaxi, heroBike, heroHeli]) {
       if (!v.respawnPending) continue;
       const h = v.home;
@@ -1087,13 +1205,13 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       updateAction(dt);
       for (const v of vehicles) {
         if (v.hidden || v === current) continue;
-        if (v.driver === 'ai' || v.awake) simulate(v, dt);
+        if (v.driver === 'ai' || v.awake || v.mode === 'boat') simulate(v, dt);
       }
       collideVehicles();
       collidePerson();
       for (const v of vehicles) {
         if (v.hidden) continue;
-        if ((v === current || v.awake || v.driver) && v.mode !== 'cyclist') runOver(v);
+        if ((v === current || v.awake || v.driver) && v.mode !== 'cyclist' && v.mode !== 'boat') runOver(v);
         if (v.state !== 'ok') updateEffects(v);
       }
       updateSmokingTraffic();
@@ -1137,7 +1255,8 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
       heroes: [heroTaxi, heroBike, heroHeli].map((v) => ({
         kind: v.kind, x: v.entity.position.x, y: v.entity.position.y, z: v.entity.position.z, heading: v.entity.heading,
         health: v.state === 'wrecked' ? 100 : Math.max(HEALTH.smoke + 1, v.health)
-      }))
+      })),
+      boats: heroBoats.map((v) => ({ x: v.entity.position.x, z: v.entity.position.z, heading: v.entity.heading, moored: !!v.entity.moored || v === current }))
     }),
     set: (data) => {
       for (const h of data?.heroes || []) {
@@ -1153,6 +1272,25 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
         if (Number.isFinite(h.health)) v.health = h.health;
         v.awake = v.mode === 'helicopter'; // (one left in the air settles to the ground)
       }
+      (data?.boats || []).forEach((b, i) => {
+        const v = heroBoats[i];
+        if (!v || ![b.x, b.z, b.heading].every(Number.isFinite)) return;
+        const e = v.entity;
+        // (one left at or near her berth is tied up at it, as the berths are now)
+        const h = v.home;
+        const atBerth = Math.hypot(b.x - h.x, b.z - h.z) < 30;
+        const x = atBerth ? h.x : b.x, z = atBerth ? h.z : b.z;
+        e.position.set(x, ISLAND_BOUNDS.waterLevel, z);
+        e.prevX = x;
+        e.prevZ = z;
+        e.heading = atBerth ? h.heading : b.heading;
+        e.speed = 0;
+        e.moored = true; // (whoever left her at sea comes back to find her tied up there)
+        e.sailsUp = false;
+        e.sailShow = 0;
+        v.lastUsed = game.time;
+        poseSailboat(e, 0.016, game.time);
+      });
     }
   });
 
@@ -1183,7 +1321,11 @@ function createVehicles(game, { controllerManager, trafficSystem, cameraSystem, 
     get busy() {
       return !!action;
     },
-    heroes: { taxi: heroTaxi, bicycle: heroBike, helicopter: heroHeli },
+    heroes: { taxi: heroTaxi, bicycle: heroBike, helicopter: heroHeli, boats: heroBoats },
+    /** Where the player stepped aboard the boat they are sailing (null ashore): the save keeps them on land */
+    get lastShore() {
+      return lastShore;
+    },
     update,
     dispose() {
       offControllers();

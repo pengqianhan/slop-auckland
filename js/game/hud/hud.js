@@ -20,6 +20,8 @@ const WEAPON_ICONS = {
 const SPEAKER_COLORS = ['#ffcb2e', '#2de2d0', '#ff7aa8', '#9db8ff', '#5cf28c', '#ff9f43', '#c38bff'];
 const GEARS = [0, 22, 44, 70, 100, 135]; // km/h where each gear starts
 const GEAR_TEXT = ['', 'Gear 1', 'Gear 2', 'Gear 3', 'Gear 4', 'Gear 5', 'Gear 6'];
+// A sailboat's point of sail, by the angle off the wind (degrees)
+const pointOfSail = (deg) => (deg < 35 ? 'In irons' : deg < 55 ? 'Close-hauled' : deg < 75 ? 'Close reach' : deg < 110 ? 'Beam reach' : deg < 155 ? 'Broad reach' : 'Running');
 const LOW_HEALTH = 0.3;
 // notification icons by name (text glyphs, no emoji)
 const NOTE_ICONS = { phone: '☎︎', cash: '$', money: '$', star: '★', police: '★', mission: '!', home: '⌂', health: '+', kiwi: '✦', race: '⚑' };
@@ -612,14 +614,15 @@ function createHud(game, root, { reducedMotion }) {
       was.vehicle = vmode;
       root.dataset.vehicle = vmode || 'foot';
       speedo.classList.toggle('is-on', !!vmode);
-      speedUnit.textContent = vmode === 'helicopter' ? 'm' : 'km/h';
+      speedUnit.textContent = vmode === 'helicopter' ? 'm' : vmode === 'boat' ? 'kn' : 'km/h';
       st.speedTimer = 0;
     }
     if (v && (st.speedTimer -= realDt) <= 0) {
       st.speedTimer = 0.06;
       const heli = v.mode === 'helicopter';
+      const boat = v.mode === 'boat';
       const kmh = Math.abs(v.speed || 0) * 3.6;
-      const speed = heli ? Math.max(0, Math.round((Number.isFinite(v.y) ? v.y : p.position.y) + GEO.frame.sea)) : Math.round(kmh);
+      const speed = heli ? Math.max(0, Math.round((Number.isFinite(v.y) ? v.y : p.position.y) + GEO.frame.sea)) : boat ? Math.round(kmh / 1.852) : Math.round(kmh);
       if (speed !== was.speed) {
         was.speed = speed;
         speedNum.textContent = String(speed);
@@ -628,14 +631,14 @@ function createHud(game, root, { reducedMotion }) {
       while (gear < GEARS.length && kmh >= GEARS[gear]) gear++;
       const lo = GEARS[gear - 1], hi = gear < GEARS.length ? GEARS[gear] : GEARS[GEARS.length - 1] + 40;
       const reverse = (v.speed || 0) < -0.3;
-      const rpmRaw = heli ? Math.min(1, kmh / 190) : reverse ? Math.min(1, kmh / 25) : 0.12 + 0.88 * Math.min(1, (kmh - lo) / (hi - lo));
+      const rpmRaw = heli ? Math.min(1, kmh / 190) : boat ? Math.min(1, v.entity?.power || 0) : reverse ? Math.min(1, kmh / 25) : 0.12 + 0.88 * Math.min(1, (kmh - lo) / (hi - lo));
       const rpm = Math.round(rpmRaw * 24) / 24;
       if (rpm !== was.rpm) {
         was.rpm = rpm;
         revFill.style.transform = `scaleX(${rpm})`;
         rev.classList.toggle('is-red', rpm > 0.9);
       }
-      const gearText = heli ? 'Altitude' : reverse ? 'Gear R' : kmh < 1 ? 'Gear N' : GEAR_TEXT[gear];
+      const gearText = heli ? 'Altitude' : boat ? (reverse ? 'Motoring astern' : pointOfSail(Math.abs(v.entity?.offWind || 0) * 57.3)) : reverse ? 'Gear R' : kmh < 1 ? 'Gear N' : GEAR_TEXT[gear];
       if (gearText !== was.gear) {
         was.gear = gearText;
         gearEl.textContent = gearText;
@@ -650,7 +653,7 @@ function createHud(game, root, { reducedMotion }) {
         was.vstate = vstate;
         vdmg.dataset.state = vstate;
       }
-      const vbike = v.mode === 'cyclist';
+      const vbike = v.mode === 'cyclist' || v.mode === 'boat';
       if (vbike !== was.vbike) {
         was.vbike = vbike;
         vdmg.classList.toggle('is-hidden', vbike);

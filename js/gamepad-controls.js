@@ -161,7 +161,7 @@ class GamepadControls {
     if (recenter) this.camera.resetOrbit();
 
     const mode = this.controller.activeMode;
-    const driving = mode === 'car' || mode === 'cyclist';
+    const driving = mode === 'car' || mode === 'cyclist' || mode === 'boat';
     const movement = driving ? { x: steeringAxis(pad.axes?.[0]), y: 0 } : stick(pad, 0);
     const look = stick(pad, 2);
     let drive = -movement.y;
