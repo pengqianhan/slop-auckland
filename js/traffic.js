@@ -35,6 +35,12 @@ const ACROSS = KEEP > 0 ? 'L' : 'R';
 
 const NUM_CARS = 200;
 const NUM_BUSES = 12;
+// Reserve cars the game can spawn as its own vehicles (body kind, police, how many): see createTrafficSystem
+const GAME_RESERVE = [
+  ['taxi', false, 2], ['sedan', false, 3], ['suv', false, 3], ['minivan', false, 1], ['pickup', false, 2], ['van', false, 2],
+  ['sedan', true, 4], ['suv', true, 2]
+];
+const ALL_CARS = NUM_CARS + GAME_RESERVE.reduce((n, r) => n + r[2], 0);
 
 // Intelligent Driver Model: max acceleration, comfortable braking, time headway, standstill gap; the sideways
 // acceleration drivers accept in bends, which sets how fast they take each turn or lane shift; and how hard they brake
@@ -115,19 +121,31 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   const group = new THREE.Group();
   group.name = 'AucklandTrafficAndPedestrians';
   let collisionListener = null;
+  let collisionListeners = [];
   const collisionEvent = { a: null, b: null, kind: 'vehicle', x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, speed: 0 };
 
+  // The audio's listener (one, replaceable); the game adds its own with addCollisionListener
   function setCollisionListener(listener) {
     collisionListener = typeof listener === 'function' ? listener : null;
   }
 
+  function addCollisionListener(listener) {
+    if (typeof listener !== 'function') return () => {};
+    collisionListeners.push(listener);
+    return () => {
+      collisionListeners = collisionListeners.filter((l) => l !== listener);
+    };
+  }
+
   // Synchronous notification: listeners must copy any fields they retain. Normal points from b toward a.
-  function reportCollision(a, b, x, y, z, nx, nz, speed) {
-    if (!collisionListener || speed <= 0.5) return;
-    collisionEvent.a = a; collisionEvent.b = b;
+  // kind: 'vehicle' (two vehicles), or 'pedestrian' (a vehicle and the player on foot: the game's alone, not a crash)
+  function reportCollision(a, b, x, y, z, nx, nz, speed, kind = 'vehicle') {
+    if ((!collisionListener && !collisionListeners.length) || speed <= 0.5) return;
+    collisionEvent.a = a; collisionEvent.b = b; collisionEvent.kind = kind;
     collisionEvent.x = x; collisionEvent.y = y; collisionEvent.z = z;
     collisionEvent.nx = nx; collisionEvent.nz = nz; collisionEvent.speed = speed;
-    collisionListener(collisionEvent);
+    if (collisionListener && kind !== 'pedestrian') collisionListener(collisionEvent);
+    for (let i = 0; i < collisionListeners.length; i++) collisionListeners[i](collisionEvent);
   }
 
   const dummy = new THREE.Object3D();
@@ -186,14 +204,17 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       evade: 0, alarm: 0, panicUntil: 0, panicAcc: 0, reaction: 0.6 + Math.random() * 0.4,
       x: 0, z: 0, gy: 0, gp: 0, gr: 0, prevX: 0, prevZ: 0, tx: 0, tz: 1, nose: 0, yaw: 0, yawRate: 0, steer: 0, delta: 0,
       pitch: 0, roll: 0, pitchVel: 0, rollVel: 0, vx: 0, vz: 0, yawOffset: 0, yawVel: 0, impactTime: 0,
-      pAhead: Infinity, pRight: 0, pSpeed: 0, wheelSpin: Math.random() * Math.PI * 2
+      pAhead: Infinity, pRight: 0, pSpeed: 0, wheelSpin: Math.random() * Math.PI * 2,
+      // going round a vehicle left standing in the lane (see goRound): the lateral offset it steers for, how long it
+      // has been held up, and what it is passing
+      pass: 0, passWait: 0, passUntil: 0, passFrom: null, honked: false
     };
   }
 
   // Every body kind shares one 3D wheel model, instanced separately and scaled to the kind's wheel radius
   const carWheelLeftGeo = buildSteerableWheelGeo(BODY_SPECS.sedan, -1);
   const carWheelRightGeo = buildSteerableWheelGeo(BODY_SPECS.sedan, 1);
-  const carWheelStyles = new THREE.InstancedBufferAttribute(new Float32Array(NUM_CARS * 2), 1);
+  const carWheelStyles = new THREE.InstancedBufferAttribute(new Float32Array(ALL_CARS * 2), 1);
   carWheelLeftGeo.setAttribute('wheelStyle', carWheelStyles);
   carWheelRightGeo.setAttribute('wheelStyle', carWheelStyles);
   const carWheelMat = createCarWheelMaterial({ instanced: true });
@@ -312,6 +333,26 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     cars.push(car);
   }
 
+  // Reserve cars for the game (js/game/vehicles.js): never put on the road by traffic, they give the instanced bodies
+  // room for the vehicles the game spawns (missions, police) and are drawn wherever it parks or drives them.
+  // detached: off traffic's books (a reserve, or a traffic car the game has taken over, e.g. by carjacking); shown:
+  // drawn at the pose the game writes into it; lightsOff: parked, no brake lamps or headlights.
+  for (const [bodyType, police, n] of GAME_RESERVE) {
+    for (let k = 0; k < n; k++) {
+      const kind = CAR_KINDS[bodyType];
+      const car = createVehicle(false, kind.half, kind.halfWidth, kind.axle, CAR_DRIVER, 11);
+      const style = police ? carStyleCode({ livery: 1, metallic: 0, trim: 2, wheel: 3 }) : carStyleCode({ livery: 0, metallic: 1, trim: 1, wheel: k % 4 });
+      const col = police ? policeWhite : bodyType === 'taxi' ? cabWhite : fleetStyles[bodyType][k % fleetStyles[bodyType].length].col;
+      if (police) policeCounts[bodyType]++;
+      counts[bodyType]++;
+      Object.assign(car, {
+        isPolice: police, bodyType, paint: [Math.fround(col.r), Math.fround(col.g), Math.fround(col.b)], style,
+        halfL: kind.halfL, mass: kind.mass, engine: kind.engine, reserve: true, detached: true, shown: false
+      });
+      cars.push(car);
+    }
+  }
+
   // Per body kind: the full model (with separately instanced spinning wheels near the camera) and, beyond
   // CAR_PROXY_DISTANCE, the ~250-triangle stand-in, plus the contact shadow's footprint (width, length, centre z).
   // Instance slots are handed out every frame to the cars the camera can see (or whose shadow it may see), see
@@ -336,8 +377,8 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   }
   const bodyMeshes = Object.values(bodies).flatMap((b) => [b.near, b.far]);
 
-  const carWheelLeftInst = new THREE.InstancedMesh(carWheelLeftGeo, carWheelMat, NUM_CARS * 2);
-  const carWheelRightInst = new THREE.InstancedMesh(carWheelRightGeo, carWheelMat, NUM_CARS * 2);
+  const carWheelLeftInst = new THREE.InstancedMesh(carWheelLeftGeo, carWheelMat, ALL_CARS * 2);
+  const carWheelRightInst = new THREE.InstancedMesh(carWheelRightGeo, carWheelMat, ALL_CARS * 2);
   carWheelRightInst.userData.sharesPipelineWith = carWheelLeftInst;
 
   // 3D Collision Spark & Debris Particle Pool
@@ -382,7 +423,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     suv: new THREE.InstancedMesh(buildLightbarGeometry(BODY_SPECS.suv), lightbarMat, Math.max(1, policeCounts.suv))
   };
   const policeLightbarMeshes = [policeLightbars.sedan, policeLightbars.suv];
-  const carShadowInst = new THREE.InstancedMesh(unitPlane, contactShadowMat, NUM_CARS);
+  const carShadowInst = new THREE.InstancedMesh(unitPlane, contactShadowMat, ALL_CARS);
   carShadowInst.renderOrder = 998;
 
   for (const m of bodyMeshes) m.castShadow = m.receiveShadow = true;
@@ -624,17 +665,21 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   }
   // Could the camera see a sphere of radius r around ground point (x, z)? Side planes only: the near and far
   // planes depend on depth conventions, and the side planes alone already rule out everything behind the camera.
-  function visible(x, z, r) {
+  // (y: the ground's height there — on Ponsonby's ridge or K Road a car right under the camera is ~50 m above y = 1)
+  function visible(x, z, r, y = 1) {
     if (!hasView) return false;
     for (let k = 0; k < 4; k++) {
       const { normal, constant } = frustum.planes[k];
-      if (normal.x * x + normal.y + normal.z * z + constant < -r) return false;
+      if (normal.x * x + normal.y * y + normal.z * z + constant < -r) return false;
     }
     return true;
   }
 
+  // (measured from the ground there, like visible(): on the ridges a spot beside the camera is not 50 m below it)
   function nearView(x, z, radius, distance) {
-    return hasView && Math.hypot(x - camX, camY, z - camZ) < distance && visible(x, z, radius);
+    if (!hasView) return false;
+    const y = terrainHeight(x, z) + 1;
+    return Math.hypot(x - camX, camY - y, z - camZ) < distance && visible(x, z, radius, y);
   }
 
   // Edges and signalized intersections around the focus, to place vehicles and pedestrians on
@@ -1046,7 +1091,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     if (v.move.out[v.lane] < 0) {
       const t = v.lane + Math.sign(nearestLane(v.move, v.lane) - v.lane);
       if (laneSafe(v, t, -4)) target = t;
-    } else if (v.speed > 2) {
+    } else if (v.speed > 2 || v.blockedByObstacle) {
       let best = laneAcc(v, v.lane) + 0.6;
       for (let t = v.lane - 1; t <= v.lane + 1; t += 2) {
         if (t < 0 || t >= e.lanes.length || v.move.out[t] < 0 || !laneSafe(v, t, -3)) continue;
@@ -1095,6 +1140,8 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     let worst = o ? brake(v, o.s - o.v.half - v.s - v.half, o.v.speed) : 0;
     const pg = playerGap(v, v.edge.lanes[t] - v.edge.lanes[v.lane] - v.dl);
     if (pg < LOOKAHEAD) worst = Math.min(worst, brake(v, pg, v.pSpeed));
+    const og = obstacleGap(v, v.edge.lanes[t] - v.edge.lanes[v.lane] - v.dl);
+    if (og < LOOKAHEAD) worst = Math.min(worst, brake(v, Math.max(og, 0.1), obstacleSpeed));
     return freeAcc(v) + worst;
   }
 
@@ -1159,8 +1206,24 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
         v.leaderSpeed = v.pSpeed;
       }
     }
+    // a vehicle the game left standing in the lane: stop behind it like a queue (and look for a way round, see
+    // changeLanes)
+    obstacleNearest = null;
+    let og = obstacleGap(v, 0);
+    v.blockedByObstacle = og < 14;
+    v.blockedBy = og < 14 && obstacleSpeed < 0.5 ? obstacleNearest : null;
+    if (v.pass && obstacleNearest === v.passFrom) og = Infinity; // (going round it: see goRound)
+    if (og > -1 && og < LOOKAHEAD) {
+      worst = Math.min(worst, brake(v, Math.max(og, 0.1), obstacleSpeed));
+      if (og < v.gap) {
+        v.gap = Math.max(og, 0);
+        v.leaderSpeed = obstacleSpeed;
+      }
+    }
     const acc = Math.min(freeAcc(v) + worst, (cap - v.speed) * 2);
     v.acc = clamp(acc, -9, v.driver.a);
+    // told to stop by the game (a carjacking, a road block): braking as hard as it can
+    if (v.stopUntil > clock) v.acc = Math.min(v.acc, -v.driver.bMax);
     // dodging the player: braking (as hard as it can, unless that would stop it before it has swerved out of the way),
     // or flooring it (unless it must brake for something ahead)
     if (clock < v.panicUntil) {
@@ -1289,6 +1352,93 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     v.move = chooseMove(v, false);
   }
 
+  // A vehicle the game left standing in the lane (the player's abandoned car, a wreck) held up a one-lane street for
+  // good: the queue behind it only cleared when traffic gave up on it out of sight, and mission drivers stalled in it.
+  // Now a driver held up behind one for a moment sounds the horn, and after a few seconds squeezes round it at a
+  // crawl: over the centre line (on the right, keeping left), or past the kerb side if that's where the room is, once
+  // the road there is clear of kerbs, islands and oncoming traffic for the length of the manoeuvre. It steers back
+  // into its lane once past.
+  const PASS_WAIT = 3.2; // s held up before going round
+  const PASS_SPEED = 5.5; // m/s while alongside it
+  function goRound(v, dt) {
+    if (v.pass) {
+      const o = v.passFrom;
+      const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+      const behind = o ? (o.position.x - v.x) * fx + (o.position.z - v.z) * fz + v.half + (o.halfL || 2.3) + 2.5 : -1;
+      if (behind < 0 || v.conn || clock > v.passUntil) {
+        v.pass = 0;
+        v.passFrom = null;
+        v.passWait = 0;
+        v.honked = false;
+      } else {
+        v.acc = Math.min(v.acc, (PASS_SPEED - v.speed) * 1.5);
+      }
+      return;
+    }
+    const o = v.blockedBy;
+    if (!o || v.conn || v.speed > 1.2 || clock < v.panicUntil) {
+      v.passWait = Math.max(0, v.passWait - dt);
+      if (v.passWait === 0) v.honked = false;
+      return;
+    }
+    v.passWait += dt;
+    if (!v.honked && v.passWait > 1.2) {
+      v.honked = true;
+      if (honkListener && Math.random() < 0.7) honkListener(v);
+    }
+    if (v.passWait < PASS_WAIT) return;
+    v.passWait = PASS_WAIT - 0.6; // (if it can't yet, it looks again in a moment)
+    const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+    const dx = o.position.x - v.x, dz = o.position.z - v.z;
+    const ahead = dx * fx + dz * fz;
+    const lat = dz * fx - dx * fz; // the obstacle's centre, right of v
+    const s = Math.abs(Math.sin(o.heading - v.yaw)), c = Math.abs(Math.cos(o.heading - v.yaw));
+    const across = (o.halfL || 2.3) * s + (o.halfW || 0.9) * c;
+    const along = (o.halfL || 2.3) * c + (o.halfW || 0.9) * s;
+    const clear = v.halfWidth + across + 0.45;
+    const length = ahead + along + v.half + 6; // from here to where it can pull back in
+    // the oncoming lane's side first (right, keeping left), then the other
+    for (const side of PASS_SIDES) {
+      const shift = lat + side * clear; // how far right of where it is now it has to go
+      if (Math.abs(shift) > 4.2) continue;
+      if (!passRoadClear(v, shift, length, fx, fz) || !passTrafficClear(v, o, shift, length, fx, fz)) continue;
+      v.pass = v.dl + shift;
+      v.passFrom = o;
+      v.passUntil = clock + 4 + length / PASS_SPEED * 2;
+      return;
+    }
+  }
+  const PASS_SIDES = [-KEEP, KEEP];
+  // The road surface along the way round (kerbs, islands, street furniture)
+  function passRoadClear(v, shift, length, fx, fz) {
+    const rx = -fz, rz = fx; // right of v's heading
+    for (let a = 0; a <= length; a += 3) {
+      for (let k = -1; k <= 1; k += 2) {
+        const off = shift + k * (v.halfWidth - 0.1);
+        if (!network.isRoadClear(v.x + rx * off + fx * a, v.z + rz * off + fz * a, 0.15)) return false;
+      }
+    }
+    return true;
+  }
+  // Nobody in the way round: standing there, or coming the other way within the time it takes
+  function passTrafficClear(v, o, shift, length, fx, fz) {
+    const time = length / PASS_SPEED + 1.5;
+    for (let i = 0; i < vehicles.length; i++) {
+      const u = vehicles[i];
+      if (u === v || (!u.edge && !(u.detached && u.shown))) continue;
+      if (Math.abs(u.x - o.position.x) < 1 && Math.abs(u.z - o.position.z) < 1) continue; // (the one it goes round, drawn)
+      const dx = u.x - v.x, dz = u.z - v.z;
+      if (Math.abs(dx) > 160 || Math.abs(dz) > 160) continue;
+      const ahead = dx * fx + dz * fz;
+      // its speed towards v along v's heading (an oncoming car closes in at its own speed)
+      const closing = Math.max(0, -(Math.sin(u.yaw + u.yawOffset) * fx + Math.cos(u.yaw + u.yawOffset) * fz) * u.speed);
+      if (ahead < -v.half - 3 || ahead > length + closing * time + u.half) continue;
+      const lat = dz * fx - dx * fz;
+      if (Math.abs(lat - shift) < v.halfWidth + u.halfWidth + 0.5) return false;
+    }
+    return true;
+  }
+
   function drive(v, dt) {
     v.laneTimer -= dt;
     if (v.laneTimer <= 0) {
@@ -1296,6 +1446,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       changeLanes(v);
     }
     accelerate(v);
+    goRound(v, dt);
     // Give the driver a moment to recover after an impact before accelerating again.
     v.impactTime = Math.max(0, v.impactTime - dt);
     if (v.impactTime > 0) v.acc = Math.min(0, v.acc);
@@ -1345,7 +1496,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     let bend = Math.atan2(bendB.dx, bendB.dz) - Math.atan2(bendA.dx, bendA.dz);
     bend -= Math.round(bend / (Math.PI * 2)) * Math.PI * 2;
     // ...plus how far right of its path it heads, and how far right of where it should be it is (nose and dl - evade)
-    const off = v.dl - (v.evade || 0);
+    const off = v.dl - (v.evade || 0) - v.pass;
     const want = Math.atan((wheelbase * bend) / 2) + v.nose + Math.atan(((panic ? 3 : 1.2) * off) / (1 + v.speed));
     const lateral = panic ? v.driver.grip : 1.3 * v.driver.aLat; // the sideways acceleration it steers up to
     const most = Math.min(v.driver.lock, Math.atan((lateral * wheelbase) / Math.max(v.speed * v.speed, 1e-3)));
@@ -1498,10 +1649,11 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     v.impactTime = Math.max(v.impactTime, 0.8);
   }
 
-  function collideWithPlayer(v) {
-    const pe = player.entity;
+  // The player (and the game's world vehicles, as obstacles: the same body record, their own size and mass) against
+  // a traffic vehicle
+  function collideWithPlayer(v, pe = player.entity, halfW = player.halfW, halfL = player.halfL) {
     if (Math.abs(pe.position.y - v.gy) > 3) return; // one of them is on a bridge over the other
-    const reach = v.half + player.halfL + player.halfW;
+    const reach = v.half + halfL + halfW;
     const prevX = pe.prevX ?? pe.position.x, prevZ = pe.prevZ ?? pe.position.z;
     const dx = pe.position.x - prevX - v.x + v.prevX;
     const dz = pe.position.z - prevZ - v.z + v.prevZ;
@@ -1512,8 +1664,8 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     a.x = pe.position.x; a.z = pe.position.z;
     a.prevX = prevX; a.prevZ = prevZ;
     a.sin = Math.sin(heading); a.cos = Math.cos(heading);
-    a.halfW = player.halfW; a.halfL = player.halfL;
-    a.mass = pe.type === 'car' ? 1700 : pe.type === 'cyclist' ? 95 : 80;
+    a.halfW = halfW; a.halfL = halfL;
+    a.mass = pe.mass ?? (pe.type === 'car' ? 1700 : pe.type === 'cyclist' ? 95 : 80);
     a.vx = a.sin * (pe.speed || 0) + (pe.vx || 0);
     a.vz = a.cos * (pe.speed || 0) + (pe.vz || 0);
     a.angularVel = pe.type === 'car' ? pe.angularVel || 0 : 0;
@@ -1543,8 +1695,56 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       pe.heaveVel += Math.min(0.7, kick * 0.06);
     }
     impactSuspension(v, -hit.nx, -hit.nz, hit.impulse / b.mass);
-    if (pe.type !== 'person') reportCollision(pe, v, hit.x, 0.58, hit.z, hit.nx, hit.nz, speed);
-    if (speed > 2.2) spawnCollisionSparks(hit.x, 0.58, hit.z, hit.nx, hit.nz, speed);
+    if (pe.type !== 'person') {
+      reportCollision(pe, v, hit.x, 0.58, hit.z, hit.nx, hit.nz, speed);
+      if (speed > 2.2) spawnCollisionSparks(hit.x, 0.58, hit.z, hit.nx, hit.nz, speed);
+    } else {
+      reportCollision(pe, v, hit.x, 1.0, hit.z, hit.nx, hit.nz, speed, 'pedestrian');
+    }
+  }
+
+  // The game's world vehicles standing or rolling where traffic drives: solid to it, and followed like a stopped
+  // vehicle ahead (see obstacleGap). Only those near the focus count.
+  let gameObstacles = [];
+  const nearObstacles = [];
+  function gatherObstacles() {
+    nearObstacles.length = 0;
+    for (let i = 0; i < gameObstacles.length; i++) {
+      const o = gameObstacles[i];
+      if (!o || o === player.entity || o.ghost) continue;
+      const dx = o.position.x - focusX, dz = o.position.z - focusZ;
+      if (dx * dx + dz * dz < VEHICLE_RADIUS * VEHICLE_RADIUS) nearObstacles.push(o);
+    }
+  }
+
+  // Bumper gap to the nearest obstacle ahead in the lane `off` metres right of v's (Infinity if none); its speed
+  // along v's heading goes in obstacleSpeed
+  let obstacleSpeed = 0;
+  let obstacleNearest = null;
+  function obstacleGap(v, off = 0) {
+    let best = Infinity;
+    if (!nearObstacles.length) return best;
+    const fx = Math.sin(v.yaw), fz = Math.cos(v.yaw);
+    for (let i = 0; i < nearObstacles.length; i++) {
+      const o = nearObstacles[i];
+      const dx = o.position.x - v.x, dz = o.position.z - v.z;
+      if (Math.abs(dx) > LOOKAHEAD + 8 || Math.abs(dz) > LOOKAHEAD + 8 || Math.abs(o.position.y - v.gy) > 3) continue;
+      const aheadD = dx * fx + dz * fz;
+      if (aheadD < 0) continue;
+      // its extent across v's heading, as it is turned
+      const s = Math.abs(Math.sin(o.heading - v.yaw));
+      const c = Math.abs(Math.cos(o.heading - v.yaw));
+      const across = o.halfL * s + o.halfW * c;
+      const along = o.halfL * c + o.halfW * s;
+      if (Math.abs(dz * fx - dx * fz - off) > v.halfWidth + across + 0.35) continue;
+      const gap = aheadD - v.half - along;
+      if (gap < best) {
+        best = gap;
+        obstacleNearest = o;
+        obstacleSpeed = Math.max(0, (Math.sin(o.heading) * (o.speed || 0) + (o.vx || 0)) * fx + (Math.cos(o.heading) * (o.speed || 0) + (o.vz || 0)) * fz);
+      }
+    }
+    return best;
   }
 
   // Only disturbed traffic needs pair contacts. Newly struck cars join the same
@@ -1614,6 +1814,8 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     v.dl = v.dlv = 0;
     v.evade = v.alarm = v.panicUntil = v.panicAcc = 0;
     v.vx = v.vz = v.yawOffset = v.yawVel = v.pitch = v.pitchVel = v.roll = v.rollVel = 0;
+    v.health = 100; // (the game's damage: back on the road as new)
+    v.stopUntil = 0;
     locate(v);
     v.prevX = v.x;
     v.prevZ = v.z;
@@ -1710,7 +1912,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     const forwardDist = (c.x - c.prevX) * sinY + (c.z - c.prevZ) * cosY;
     const rawStep = forwardDist / spec.wheelRadius;
     c.wheelSpin = (c.wheelSpin + Math.sign(rawStep) * Math.min(Math.abs(rawStep), 0.48)) % (Math.PI * 2);
-    if (hasView && !visible(c.x, c.z, 18)) return;
+    if (hasView && !visible(c.x, c.z, 18, c.gy + 1)) return;
 
     const near = Math.hypot(c.x - focusX, c.z - focusZ) < CAR_PROXY_DISTANCE;
     const bodyInst = near ? bodies[c.bodyType].near : bodies[c.bodyType].far;
@@ -1738,7 +1940,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     const state = attrs.carState.array;
     const o4 = slot * 4;
     const blinkOn = c.blink !== 0 && (clock + c.blinkPhase) % 0.8 <= 0.4;
-    const b0 = c.acc < -0.8 || c.speed < 0.3 ? 1 : 0;
+    const b0 = !c.lightsOff && (c.acc < -0.8 || c.speed < 0.3) ? 1 : 0;
     const b1 = blinkOn && c.blink < 0 ? 1 : 0;
     const b2 = blinkOn && c.blink > 0 ? 1 : 0;
     const b3 = c.style;
@@ -1762,7 +1964,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     const dxCam = c.x - camX;
     const dzCam = c.z - camZ;
     const distSq = dxCam * dxCam + dzCam * dzCam + camY * camY;
-    if (distSq < MAX_LIGHT_DIST_SQ) {
+    if (distSq < MAX_LIGHT_DIST_SQ && !c.lightsOff) {
       const d = Math.sqrt(distSq);
       const forwardDot = dxCam * camFwdX + dzCam * camFwdZ;
       const effDist = d + Math.max(0, 5.0 - forwardDot) * 3.2;
@@ -1794,7 +1996,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     const forwardDist = (b.x - b.prevX) * sinY + (b.z - b.prevZ) * cosY;
     const rawStep = forwardDist / BUS_SPEC.wheelRadius;
     b.wheelSpin = (b.wheelSpin + Math.sign(rawStep) * Math.min(Math.abs(rawStep), 0.48)) % (Math.PI * 2);
-    if (hasView && !visible(b.x, b.z, 22)) return;
+    if (hasView && !visible(b.x, b.z, 22, b.gy + 1.5)) return;
 
     const i = visibleBuses++;
     dummy.position.set(b.x, b.gy + 0.03, b.z);
@@ -1982,8 +2184,9 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       player.vx = player.fx * speed + (playerEntity.vx || 0);
       player.vz = player.fz * speed + (playerEntity.vz || 0);
     }
-    player.halfW = activeMode === 'cyclist' ? 0.35 : activeMode === 'person' ? 0.32 : 0.86;
-    player.halfL = activeMode === 'cyclist' ? 0.85 : activeMode === 'person' ? 0.32 : 2.18;
+    player.halfW = activeMode === 'cyclist' ? 0.35 : activeMode === 'person' ? 0.32 : playerEntity?.halfW ?? 0.86;
+    player.halfL = activeMode === 'cyclist' ? 0.85 : activeMode === 'person' ? 0.32 : playerEntity?.halfL ?? 2.18;
+    gatherObstacles();
 
     // 1. Cars & buses
     // Limit attempted placements, not just successes, and rotate through the pool so an awkward location
@@ -1993,6 +2196,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       const v = vehicles[vehicleCursor];
       const out = inFleet(vehicleCursor);
       vehicleCursor = (vehicleCursor + 1) % vehicles.length;
+      if (v.detached) continue; // (the game's)
       const d = v.edge ? Math.hypot(v.x - focusX, v.z - focusZ) : Infinity;
       // (one that has stood for a minute and a half where nobody is looking goes too: Auckland's short blocks of
       // one-lane streets lock up now and then, and this way a jam dissolves from its unseen end)
@@ -2032,9 +2236,18 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     if (player.active) {
       for (const v of vehicles) if (v.edge) collideWithPlayer(v);
     }
+    for (let k = 0; k < nearObstacles.length; k++) {
+      const o = nearObstacles[k];
+      for (const v of vehicles) if (v.edge) collideWithPlayer(v, o, o.halfW, o.halfL);
+    }
     collideTraffic();
+    // the game writes the final poses of its vehicles (after the collisions above moved the player's)
+    if (renderHook) renderHook();
     for (const v of vehicles) {
-      if (!v.edge) continue;
+      if (!v.edge) {
+        if (v.detached && v.shown && !v.bus) renderCar(v);
+        continue;
+      }
       if (v.bus) renderBus(v);
       else renderCar(v);
     }
@@ -2097,14 +2310,89 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     updateSparks(dt);
   }
 
+  // =========================================================================
+  // 9. THE GAME'S HOOKS (js/game/vehicles.js & world.js)
+  // =========================================================================
+  let renderHook = null;
+  let honkListener = null;
+
+  /** Take a car off traffic's books where it stands (its pose stays; drawn while v.shown). Not buses. */
+  function detach(v) {
+    if (!v || v.bus) return false;
+    v.edge = null;
+    v.conn = v.trail = v.commit = v.move = null;
+    v.detached = true;
+    v.shown = true;
+    v.speed = v.acc = v.vx = v.vz = v.yawVel = v.yawRate = v.blink = 0;
+    v.evade = v.panicUntil = v.panicAcc = v.alarm = 0;
+    v.stopUntil = 0;
+    return true;
+  }
+
+  /** Hand it back: a reserve waits to be acquired again, a traffic car goes back on a road when one is free */
+  function release(v) {
+    if (!v) return;
+    v.shown = false;
+    v.lightsOff = false;
+    v.edge = null;
+    if (v.reserve) v.taken = false;
+    else v.detached = false;
+  }
+
+  /** A free reserve car of a body kind (police: in Battenburg checks), or null */
+  function acquire(bodyType, police = false) {
+    for (const v of cars) {
+      if (v.reserve && !v.taken && v.bodyType === bodyType && !!v.isPolice === !!police) {
+        v.taken = true;
+        return v;
+      }
+    }
+    return null;
+  }
+
   return {
     group,
     update,
     setCollisionListener,
+    addCollisionListener,
     cars,
     buses,
+    vehicles,
     peds: pedestrianSystem.peds,
-    network
+    pedestrians: pedestrianSystem,
+    network,
+    game: {
+      detach,
+      release,
+      acquire,
+      /** Brake as hard as it can for `seconds` */
+      stop: (v, seconds = 3) => {
+        v.stopUntil = clock + seconds;
+      },
+      /** Panic: floor it (accelerate) or stand on the brakes, for `seconds` */
+      scare: (v, seconds = 3, accelerate = true) => {
+        v.panicUntil = clock + seconds;
+        v.panicAcc = accelerate ? 1 : -1;
+        v.alarm = 0;
+      },
+      /** World vehicles traffic must not drive through: entity-like { position, heading, speed, vx, vz, halfW, halfL, mass } */
+      setObstacles: (list) => {
+        gameObstacles = Array.isArray(list) ? list : [];
+      },
+      /** Called every update after the collisions, before instances are written */
+      setRenderHook: (fn) => {
+        renderHook = typeof fn === 'function' ? fn : null;
+      },
+      /** fn(vehicleRecord): a driver held up behind something standing in the lane sounds the horn (the audio) */
+      setHonkListener: (fn) => {
+        honkListener = typeof fn === 'function' ? fn : null;
+      },
+      /** Could the camera see a sphere of radius r at (x, z) within `distance` m? */
+      nearView: (x, z, r, distance) => nearView(x, z, r, distance),
+      get clock() {
+        return clock;
+      }
+    }
   };
 }
 

@@ -21,6 +21,7 @@ import { LightingSystem } from './lighting.js';
 import { CityMapSystem } from './city-map.js';
 import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
+import { createGame } from './game/index.js';
 
 // Application setup, shader warm-up and frame loop.
 
@@ -149,10 +150,14 @@ async function initApp() {
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter, Kiwi) & Multi-Camera System
   await showLoadingStage('Preparing player, vehicles and controls...', 'controllers');
+  // ?sandbox: the free-roam toy as it was (switch between the five at will); otherwise the game (js/game), with one
+  // player character who walks up to vehicles and gets in
+  const sandbox = new URLSearchParams(location.search).has('sandbox');
   const controllerManager = new ThirdPersonControllerManager(scene, allColliders);
-  // Reuse teleport placement so saved players return at rest, close to their last positions.
+  // Reuse teleport placement so saved players return at rest, close to their last positions (the game keeps its own
+  // save, see js/game/save.js)
   try {
-    const saved = JSON.parse(localStorage.getItem('akl-player-state'));
+    const saved = sandbox ? JSON.parse(localStorage.getItem('akl-player-state')) : null;
     if (saved?.version === 2) {
       for (const mode of Object.keys(controllerManager.entities)) {
         const p = saved.entities?.[mode];
@@ -165,6 +170,7 @@ async function initApp() {
   } catch { /* Missing or unavailable storage does not prevent playing. */ }
 
   function savePlayerState() {
+    if (!sandbox) return;
     try {
       const entities = Object.fromEntries(Object.entries(controllerManager.entities).map(([mode, entity]) => [mode, {
         x: entity.position.x, y: entity.position.y, z: entity.position.z, heading: entity.heading
@@ -331,7 +337,9 @@ async function initApp() {
   const elAltitude = document.getElementById('hud-altitude');
   const elLocation = document.getElementById('hud-location');
   const elControlsHint = document.getElementById('hud-controls-hint');
-  const gamepadControls = new GamepadControls(controllerManager, cameraSystem, {
+  // (in the game the pad's buttons are mostly the game's: callbacks.onPad hands them to game.input, see below)
+  const gamepadCallbacks = {
+    gameMode: !sandbox,
     onCycleMode: (step) => {
       const modes = ['person', 'car', 'cyclist', 'helicopter', 'kiwi'];
       selectMode(modes[(modes.indexOf(controllerManager.activeMode) + step + modes.length) % modes.length]);
@@ -339,14 +347,21 @@ async function initApp() {
     onCycleCamera: cycleCamera,
     onToggleMap: () => mapSystem.toggleFullMap(!mapSystem.isFullMapOpen),
     onCloseMap: () => mapSystem.toggleFullMap(false)
-  });
+  };
+  const gamepadControls = new GamepadControls(controllerManager, cameraSystem, gamepadCallbacks);
 
   // Keyboard guide for each mode: [keys, action]
-  const controlHints = {
+  const controlHints = sandbox ? {
     person: [[['W', 'S'], 'Walk / Run'], [['A', 'D'], 'Turn'], [['Space'], 'Jump'], [['Drag'], 'Orbit']],
     car: [[['W', 'S'], 'Drive / Reverse'], [['A', 'D'], 'Steer'], [['B'], 'Horn'], [['Drag'], 'Orbit']],
     cyclist: [[['W', 'S'], 'Pedal / Brake'], [['Space'], 'Brake'], [['A', 'D'], 'Lean & Turn'], [['Drag'], 'Orbit']],
     helicopter: [[['W', 'S'], 'Pitch'], [['A', 'D'], 'Yaw'], [['Space', 'E'], 'Ascend'], [['Q', 'C'], 'Descend']],
+    kiwi: [[['W', 'S'], 'Fly / Slow'], [['A', 'D'], 'Turn'], [['Space', 'E'], 'Climb'], [['Q', 'C'], 'Dive']]
+  } : {
+    person: [[['W', 'A', 'S', 'D'], 'Move'], [['Shift'], 'Sprint'], [['F'], 'Get in'], [['RMB'], 'Aim'], [['Click'], 'Mouse look']],
+    car: [[['W', 'S'], 'Drive / Reverse'], [['A', 'D'], 'Steer'], [['F'], 'Get out'], [['B'], 'Horn']],
+    cyclist: [[['W', 'S'], 'Pedal / Brake'], [['A', 'D'], 'Lean & Turn'], [['F'], 'Get off']],
+    helicopter: [[['W', 'S'], 'Pitch'], [['A', 'D'], 'Yaw'], [['Space', 'E'], 'Ascend'], [['Q', 'C'], 'Descend'], [['F'], 'Bail out']],
     kiwi: [[['W', 'S'], 'Fly / Slow'], [['A', 'D'], 'Turn'], [['Space', 'E'], 'Climb'], [['Q', 'C'], 'Dive']]
   };
   // Top speeds in km/h (controllers.js caps them at 8.2, 36, 19, 52 & 26 m/s): full scale of the speed meter
@@ -591,9 +606,11 @@ async function initApp() {
     });
   }
 
-  // Global keyboard shortcuts for modes (1-4, K for the kiwi), cameras (V / 5-0), and HUD (H)
+  // Global keyboard shortcuts for modes (1-4, K for the kiwi), cameras (V / 5-0), and HUD (H). In the game the digits
+  // are weapon slots (js/game/input.js) and there is one player: only the sandbox switches modes.
   window.addEventListener('keydown', (e) => {
     if (isTypingInField(e)) return;
+    if (!sandbox && (/^Digit\d$/.test(e.code) || e.code === 'KeyK')) return;
     switch (e.code) {
       case 'Digit1':
         selectMode('person');
@@ -652,6 +669,18 @@ async function initApp() {
       mapSystem.renderFullMap();
     }
   });
+
+  // The game layer (js/game): created here, before the shaders are compiled, so its effects' materials compile
+  // behind the loading screen with the rest of the scene
+  const game = createGame({
+    scene, renderer, controllerManager, cameraSystem, trafficSystem, audioSystem, colliders: allColliders, mapSystem, sandbox
+  });
+  if (!sandbox) {
+    gamepadCallbacks.onPad = (pad, pressed, edge, held, dt) => game.input.applyPad(pad, pressed, edge, held, dt);
+    gamepadCallbacks.onPadIdle = () => game.input.clearPad();
+    // getting in & out of vehicles changes what the HUD, touch & pad controls are for
+    game.on('player:mode', ({ mode }) => selectMode(mode));
+  }
 
   // Initialize the UI and chase camera around the restored player, or the default taxi on a first visit.
   selectMode(controllerManager.activeMode);
@@ -743,6 +772,7 @@ async function initApp() {
   // 6. Animation Loop
   let lastTime = performance.now();
   let elapsed = 0;
+  let simElapsed = 0; // the simulation's clock: stops while the game is paused, slows in slow motion
   let frameCount = 0;
   let fpsTimer = 0;
   let nextPlayerSave = 0;
@@ -752,8 +782,10 @@ async function initApp() {
 
   // ?debug in the address: the simulation's parts on window.akl, for poking at from the console
   const debug = new URLSearchParams(location.search).has('debug')
-    ? (window.akl = { THREE, renderer, scene, cameraSystem, controllerManager, trafficSystem, highwayTraffic, lightingSystem, mapSystem, audioSystem, renderPipeline, cityGrid, cityBlocks, streetDetails, scenePass, ssrPass, quality, selectMode, selectCamera, selectTime, teleportTo, frameMs: 0, view: null })
+    ? (window.akl = { THREE, renderer, scene, cameraSystem, controllerManager, trafficSystem, highwayTraffic, lightingSystem, mapSystem, audioSystem, renderPipeline, cityGrid, cityBlocks, streetDetails, scenePass, ssrPass, quality, selectMode, selectCamera, selectTime, teleportTo, game, frameMs: 0, view: null })
     : null;
+  // (and the profiler, akl.perf: per-stage CPU ms, draw calls, GPU time, heap; see js/perf.js)
+  if (debug) import('./perf.js').then((m) => m.installPerf(debug, { surroundings })).catch((e) => console.warn('[perf]', e));
 
   let lastFrameWall = 0;
   renderer.setAnimationLoop((now) => {
@@ -765,10 +797,14 @@ async function initApp() {
     lastTime = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
     elapsed += dt;
+    // The game's clock (js/game/core.js): 0 while paused, scaled in slow motion / hit-stop; the whole simulation
+    // (people, traffic, vehicles) steps by it, the camera and rendering by the wall clock
+    const simDt = game.simDt(dt);
+    simElapsed += simDt;
 
     // Update 3rd-person controllers, camera, signals, traffic & vehicle collisions, building LODs, and dynamic shadow focus
     gamepadControls.update(dt);
-    controllerManager.update(dt, elapsed, cameraSystem.initialized ? cameraSystem.currentPos : null);
+    if (simDt > 0) controllerManager.update(simDt, simElapsed, cameraSystem.initialized ? cameraSystem.currentPos : null);
     cameraSystem.update(dt, elapsed);
     if (debug && debug.view) {
       // a fixed viewpoint for looking around: akl.view = { from: [x, y, z], to: [x, y, z] }
@@ -776,16 +812,21 @@ async function initApp() {
       cameraSystem.camera.position.copy(cameraSystem.currentPos);
       cameraSystem.camera.lookAt(...debug.view.to);
     }
-    streetDetails.signalClock.value = elapsed;
-    trafficSystem.update(
-      dt,
-      elapsed,
-      cameraSystem.currentPos,
-      controllerManager.getActiveEntity(),
-      controllerManager.activeMode,
-      cameraSystem.camera
-    );
-    highwayTraffic.update(dt, cameraSystem.camera, controllerManager.getActiveEntity(), controllerManager.activeMode);
+    streetDetails.signalClock.value = simElapsed;
+    if (simDt > 0) {
+      trafficSystem.update(
+        simDt,
+        simElapsed,
+        cameraSystem.currentPos,
+        controllerManager.getActiveEntity(),
+        controllerManager.activeMode,
+        cameraSystem.camera
+      );
+      highwayTraffic.update(simDt, cameraSystem.camera, controllerManager.getActiveEntity(), controllerManager.activeMode);
+    }
+    // the game's systems (player, vehicles, world queries, effects, and everything plugged into it), after the
+    // controllers and traffic have moved everyone
+    game.update(simDt, simElapsed, dt);
     if (!document.hidden && now >= nextPlayerSave) {
       savePlayerState();
       nextPlayerSave = now + 5000;

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "nodes",
+    "viewport",
+    "view"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "x",
+          "y"
+        ],
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number",
+            "minimum": 100,
+            "maximum": 4096,
+            "description": "Text, document, table and group nodes only; other nodes size to their content."
+          },
+          "height": {
+            "type": "number",
+            "minimum": 100,
+            "maximum": 4096,
+            "description": "Text, document, table and group nodes only; other nodes size to their content."
+          }
+        }
+      }
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "zoom"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "zoom": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "view": {
+      "const": "canvas"
+    },
+    "fitView": {
+      "type": "boolean"
+    }
+  }
+}

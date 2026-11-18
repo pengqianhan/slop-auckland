@@ -3567,5 +3567,7 @@ export {
   createSteamMaterial,
   createGodRayMaterial,
   createContactShadowMaterial,
-  createCarFlareMaterial
+  createCarFlareMaterial,
+  getSmokeCloudTexture,
+  _transparentEffectMRT as transparentEffectMRT
 };

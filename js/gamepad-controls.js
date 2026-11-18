@@ -116,9 +116,14 @@ class GamepadControls {
     const edge = (i) => pressed[i] && !this.previousButtons[i] && !this.suppressedButtons[i];
     const held = (i) => pressed[i] && !this.suppressedButtons[i];
     // Capture edges before callbacks: changing mode or opening the map may synchronously call reset().
-    const toggleMap = edge(9), closeMap = edge(1);
-    const cycleMode = Number(Boolean(edge(5))) - Number(Boolean(edge(4)));
-    const cycleCamera = edge(3), recenter = edge(11);
+    // In the game (callbacks.gameMode) Start pauses and Back opens the map, Y gets in & out (the d-pad's left cycles
+    // the cameras) and the bumpers switch weapons; callbacks.onPad hands the pad to the game's input every frame.
+    const game = !!this.callbacks.gameMode;
+    const mapButton = game ? 8 : 9;
+    const toggleMap = edge(mapButton), closeMap = edge(1);
+    const cycleMode = game ? 0 : Number(Boolean(edge(5))) - Number(Boolean(edge(4)));
+    const cycleCamera = edge(game ? 14 : 3), recenter = edge(11);
+    const previous = this.previousButtons;
     this.previousButtons = pressed;
 
     const target = document.activeElement;
@@ -126,20 +131,28 @@ class GamepadControls {
     if (!this.focused || document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus()) || typing) {
       this.suppressedButtons = pressed.slice();
       this.controller.clearGamepadInput();
+      this.callbacks.onPadIdle?.();
       return;
     }
 
     const revision = this.revision;
     if (toggleMap) {
       this.controller.clearGamepadInput();
+      this.callbacks.onPadIdle?.();
       this.callbacks.onToggleMap?.();
       return;
     }
     if (!this.enabled) {
       this.controller.clearGamepadInput();
-      for (let i = 0; i < BUTTON_COUNT; i++) if (i !== 1 && i !== 9) this.suppressedButtons[i] = pressed[i];
+      this.callbacks.onPadIdle?.();
+      for (let i = 0; i < BUTTON_COUNT; i++) if (i !== 1 && i !== mapButton) this.suppressedButtons[i] = pressed[i];
       if (closeMap) this.callbacks.onCloseMap?.();
       return;
+    }
+    if (this.callbacks.onPad) {
+      // (edges against the buttons as they were, before this frame)
+      this.callbacks.onPad(pad, pressed, (i) => pressed[i] && !previous[i] && !this.suppressedButtons[i], held, dt);
+      if (revision !== this.revision) return;
     }
     if (cycleMode) this.callbacks.onCycleMode?.(cycleMode);
     if (revision !== this.revision) return;

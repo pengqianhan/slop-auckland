@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "nodes": {},
+  "viewport": {
+    "x": 64,
+    "y": 32,
+    "zoom": 1
+  },
+  "view": "canvas"
+}

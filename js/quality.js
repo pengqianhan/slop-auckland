@@ -15,11 +15,16 @@
 // A chosen tier keeps a fixed resolution; only on "auto" does the resolution follow the frame time, a tier is guessed
 // from the graphics card, and the next tier down takes over when the lowest resolution still struggles.
 
+// shadowEvery: the sun's shadow map is drawn every n frames (js/lighting.js) — still every frame while the view moves
+// or turns quickly (shadowFollow), so only the shadows of things moving past a still view lag a frame. Medium skips
+// regardless of the view.
 const TIERS = {
-  medium: { name: 'medium', label: 'Medium', scale: 0.85, floor: 0.6, pixels: 1.5e6, msaa: 0, reflections: true, reach: 0.8, trees: 0.75 },
-  high: { name: 'high', label: 'High', scale: 1, floor: 0.6, pixels: 2.3e6, msaa: 4, reflections: true, reach: 1, trees: 1 },
-  ultra: { name: 'ultra', label: 'Ultra', scale: 1, floor: 1, pixels: Infinity, msaa: 4, reflections: true, reach: 1, trees: 1 }
+  medium: { name: 'medium', label: 'Medium', scale: 0.85, floor: 0.6, pixels: 1.5e6, msaa: 0, reflections: true, reach: 0.8, trees: 0.75, shadowEvery: 2, shadowFollow: false },
+  high: { name: 'high', label: 'High', scale: 1, floor: 0.6, pixels: 2.3e6, msaa: 4, reflections: true, reach: 1, trees: 1, shadowEvery: 2, shadowFollow: true },
+  ultra: { name: 'ultra', label: 'Ultra', scale: 1, floor: 1, pixels: Infinity, msaa: 4, reflections: true, reach: 1, trees: 1, shadowEvery: 1, shadowFollow: true }
 };
+// The tier in effect, for the engine's own per-frame choices (the sun's shadow schedule); null before start-up
+const qualityNow = { tier: null };
 const ORDER = ['medium', 'high', 'ultra'];
 const NEXT_DOWN = { high: 'medium' };
 const DEFAULT_MODE = 'ultra';
@@ -82,8 +87,11 @@ function createQualityManager({ renderer, viewport, apply, onChange = () => {}, 
   let ratio = 0;
   let lastWidth = 0;
   let lastHeight = 0;
-  // Dynamic resolution: a share of the tier's own, stepped by the frame time averaged over the last 45 frames
-  const dyn = { scale: 1, acc: 0, n: 0, settle: 3.5, upWait: 4, upDelay: 4, floorHits: 0 };
+  // Dynamic resolution: a share of the tier's own, stepped by the frame time averaged over the last 45 frames.
+  // Against see-sawing between two steps (a load right at the threshold): the wait before a step back up starts at
+  // 4 s and doubles with every step down (to 60 s); it only shrinks again (halving) after 30 s spent at full
+  // resolution within budget. The first 3.5 s after start-up (shaders, streaming) are not sampled.
+  const dyn = { scale: 1, acc: 0, n: 0, settle: 3.5, upWait: 0, upDelay: 4, floorHits: 0, calm: 0 };
   const dynamicResolution = typeof location === 'undefined' || new URLSearchParams(location.search).get('dynres') !== '0';
 
   const state = () => ({ mode, tier: tier.name, label: tier.label, scale: ratio });
@@ -107,7 +115,7 @@ function createQualityManager({ renderer, viewport, apply, onChange = () => {}, 
   }
 
   function setTier(name, settleFor = 3.5) {
-    tier = TIERS[name];
+    tier = qualityNow.tier = TIERS[name];
     dyn.acc = dyn.n = dyn.floorHits = 0;
     dyn.settle = settleFor;
     dyn.upDelay = 4;
@@ -143,6 +151,7 @@ function createQualityManager({ renderer, viewport, apply, onChange = () => {}, 
     dyn.acc += ms;
     dyn.n++;
     if (dyn.n < 45 && dyn.acc < 900) return;
+    const windowMs = dyn.acc;
     const frame = dyn.acc / dyn.n;
     dyn.acc = dyn.n = 0;
     let scale = dyn.scale;
@@ -151,13 +160,20 @@ function createQualityManager({ renderer, viewport, apply, onChange = () => {}, 
       // too slow: down a step (two when well off, straight to the floor when far off), and wait longer each time
       // before trying to go back up
       scale = frame > 45 ? floor : Math.max(floor, scale - (frame > 30 ? 0.2 : 0.1));
-      dyn.upDelay = Math.min(60, dyn.upDelay * 2);
       dyn.upWait = dyn.upDelay;
+      dyn.upDelay = Math.min(60, dyn.upDelay * 2);
+      dyn.calm = 0;
     } else if (frame < 17.4 && scale < 1 && dyn.upWait <= 0) {
       scale = Math.min(1, scale + 0.1);
-      dyn.upWait = 2;
+      dyn.upWait = 2; // (the next step up, if still fast, comes sooner: the back-off is for after a step down)
     } else if (frame < 17.4 && scale >= 1) {
-      dyn.upDelay = 4;
+      dyn.calm += windowMs / 1000;
+      if (dyn.calm > 30) {
+        dyn.calm = 0;
+        dyn.upDelay = Math.max(4, dyn.upDelay / 2);
+      }
+    } else if (frame > 17.4) {
+      dyn.calm = 0;
     }
     scale = Math.round(scale * 1000) / 1000;
     if (scale <= floor + 1e-3 && frame > 26) {
@@ -181,9 +197,10 @@ function createQualityManager({ renderer, viewport, apply, onChange = () => {}, 
     }
   }
 
+  qualityNow.tier = tier;
   apply(tier, false);
   resize();
   return { setMode, sample, resize, state, tiers: ORDER.map((name) => TIERS[name]) };
 }
 
-export { TIERS as QUALITY_TIERS, initialQuality, createQualityManager };
+export { TIERS as QUALITY_TIERS, initialQuality, createQualityManager, qualityNow };

@@ -87,7 +87,9 @@ class CityAudioSystem {
     this.enabled = true;
     try { this.enabled = localStorage.getItem('akl-sound') !== 'off'; } catch { /* Private browsing. */ }
     const smallDevice = navigator.hardwareConcurrency <= 4 || matchMedia('(pointer: coarse)').matches;
-    this.limits = smallDevice ? { motors: 6, sirens: 1, events: 5 } : { motors: 8, sirens: 2, events: 8 };
+    // (the game's police chases want several sirens at once: game/audio.js picks who sounds one, see audio-sources.js)
+    this.limits = smallDevice ? { motors: 6, sirens: 2, events: 5 } : { motors: 8, sirens: 4, events: 8 };
+    this.volume = 1; // the player's master volume (game/audio.js's settings), applied on top of the mix level
     this.motors = new Map();
     this.sirens = new Map();
     this.events = [];
@@ -102,7 +104,9 @@ class CityAudioSystem {
     this.collisionSystems = [simulation.controllerManager, simulation.trafficSystem];
     this.onCollision = (impact) => this.crash(impact);
     for (const system of this.collisionSystems) system.setCollisionListener?.(this.onCollision);
-    this.motorParams = { speed: 0, load: 0, verticalSpeed: 0, doppler: 1, seed: 0 };
+    // a driver held up behind a car standing in the lane leans on the horn (traffic.js goRound)
+    simulation.trafficSystem?.game?.setHonkListener?.((v) => this.trafficHorn(v));
+    this.motorParams = { speed: 0, load: 0, verticalSpeed: 0, doppler: 1, seed: 0, damage: 0 };
     this.windParams = { speed: 0, altitude: 0, night: 0, traffic: 0, enclosure: 0 };
     this.footPosition = { x: 0, y: 0, z: 0, seed: 0 };
     this.onGesture = (event) => {
@@ -158,6 +162,10 @@ class CityAudioSystem {
     this.master = context.createGain();
     this.master.gain.value = 0;
     this.mix.connect(this.compressor).connect(this.master).connect(context.destination);
+    // The city's own sounds (engines, people, wind, reflections) share one bus, so the game layer (game/audio.js) can
+    // duck and filter the ambience under its effects and music without touching each voice
+    this.world = context.createGain();
+    this.world.connect(this.mix);
     this.reflections = context.createGain();
     this.reflections.gain.value = 0.02;
     this.reverb = context.createConvolver();
@@ -168,8 +176,8 @@ class CityAudioSystem {
     this.reflectionFilter.type = 'lowpass';
     this.reflectionFilter.frequency.value = 2400;
     this.reflectionFilter.Q.value = 0.5;
-    this.reflections.connect(this.reverb).connect(this.reflectionFilter).connect(this.mix);
-    this.wind = createWindVoice(context, this.resources, this.mix);
+    this.reflections.connect(this.reverb).connect(this.reflectionFilter).connect(this.world);
+    this.wind = createWindVoice(context, this.resources, this.world);
     context.onstatechange = () => this.onStateChange();
   }
 
@@ -258,7 +266,7 @@ class CityAudioSystem {
       if (!slot) {
         // Retiring voices count against the budget, so rapid source changes cannot temporarily double the graph.
         if (pool.size >= limit) continue;
-        const emitter = new SpatialEmitter(this.context, this.mix, this.reflections, this.acoustics,
+        const emitter = new SpatialEmitter(this.context, this.world, this.reflections, this.acoustics,
           siren ? 9 : source.kind === 'helicopter' ? 12 : 4, siren ? 0.9 : 0, siren);
         slot = { emitter, voice: createMotorVoice(this.context, this.resources, siren ? 'siren' : source.kind, emitter.input),
           distance: 0, x: source.x, y: source.y, z: source.z, fresh: true };
@@ -275,6 +283,7 @@ class CityAudioSystem {
       params.load = source.load;
       params.verticalSpeed = source.verticalSpeed;
       params.seed = source.seed;
+      params.damage = source.damage || 0;
       params.doppler = clamp(343 / (343 + radial), 0.85, 1.18);
       slot.voice.update(params, now);
       slot.distance = distance;
@@ -332,7 +341,7 @@ class CityAudioSystem {
       }
     }
     if (this.events.length >= this.limits.events) return false;
-    const emitter = new SpatialEmitter(this.context, this.mix, this.reflections, this.acoustics,
+    const emitter = new SpatialEmitter(this.context, this.world, this.reflections, this.acoustics,
       ref, kind === 'talk' ? 1.5 : 0, kind === 'horn');
     // Do not fade away the first few milliseconds of a crash: its spatial gain and filtering are ready at onset.
     emitter.update(source, this.listener, now, range, true, crash);
@@ -383,6 +392,14 @@ class CityAudioSystem {
     return true;
   }
 
+  /** An AI driver's horn at a traffic record (x, gy, z, yaw) */
+  trafficHorn(v) {
+    if (!this.ready || !this.enabled || !this.haveListener || this.context?.state !== 'running' || document.hidden) return;
+    const now = this.context.currentTime;
+    if (now - this.lastHorn < 0.6) return;
+    if (this.emit('horn', { id: v, x: v.x, y: (v.gy || 0) + 0.7, z: v.z, heading: v.yaw + v.yawOffset, seed: ++this.collisionSequence }, { intensity: 0.6 })) this.lastHorn = now;
+  }
+
   honk(entity) {
     if (!this.ready || !this.enabled || this.context?.state !== 'running' || entity?.type !== 'car') return;
     const now = this.context.currentTime;
@@ -420,7 +437,7 @@ class CityAudioSystem {
     const enclosure = this.acoustics.enclosure;
     smooth(this.reflections.gain, 0.02 + enclosure * 0.22, now, 0.4);
     smooth(this.reflectionFilter.frequency, 2400 + enclosure * 3400, now, 0.4);
-    smooth(this.master.gain, 0.65, now, 0.12);
+    smooth(this.master.gain, 0.65 * clamp(this.volume, 0, 1), now, 0.12);
     const sources = this.sources.collect(this.listener, elapsed);
     for (let i = this.events.length - 1; i >= 0; i--) {
       const event = this.events[i];
@@ -510,7 +527,7 @@ class CityAudioSystem {
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.reset();
     this.wind?.dispose(true);
-    for (const node of [this.mix, this.compressor, this.master, this.reflections, this.reverb, this.reflectionFilter]) node?.disconnect();
+    for (const node of [this.mix, this.world, this.compressor, this.master, this.reflections, this.reverb, this.reflectionFilter]) node?.disconnect();
     if (this.context) {
       this.context.onstatechange = null;
       this.context.close().catch(() => {});

@@ -11,6 +11,14 @@ const NEAR_RADIUS = 350;
 const PED_SPAWN_DISTANCE = 150;
 const PED_AVOID_INTERVAL = 0.12;
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+// The game (js/game/world.js): hit points, how long the dead lie before they are taken away (out of sight), running
+// away from danger, and cowering (the crouch of the evasive dive's get-up, held: seconds into PEDESTRIAN_DIVE_DURATION)
+const PED_HP = 100;
+const CORPSE_TIME = 30;
+const FLEE_SPEED = 4.4;
+const COWER_POSE = 1.86;
+const DEATH_POSE = 1.0; // lying face down
+const FREE_RUN_SPEED = 5.2;
 
 function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCross, walkOn, visible, nearView }) {
   let clock = 0;
@@ -76,6 +84,29 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       diveStart: -Infinity,
       diveHeading: 0,
       diveT: 0,
+      // the game: health, death, fleeing & cowering, and free running off the walking tracks (a driver thrown out)
+      id: i,
+      hp: PED_HP,
+      dead: false,
+      deathTime: 0,
+      deathYaw: 0,
+      fleeUntil: 0,
+      fleeSpeed: FLEE_SPEED + hash(i, 9) * 1.2,
+      fleeX: 0,
+      fleeZ: 0,
+      cowerStart: 0,
+      cowerUntil: 0,
+      free: false,
+      // a free person the game steers (js/game/combat.js: armed enemies, cops on foot): the velocity it wants and
+      // where it faces; never taken back by the crowd
+      puppet: false,
+      puppetVX: 0,
+      puppetVZ: 0,
+      puppetYaw: 0,
+      freeUntil: 0,
+      freeVX: 0,
+      freeVZ: 0,
+      freeSince: 0,
       rig: new PersonRig({
         seed: i * 1.6180339 + 0.13,
         female,
@@ -136,7 +167,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     curbNodes.length = 0;
     for (let i = 0; i < peds.length; i++) {
       const p = peds[i];
-      if (p.placed) atCurb(p);
+      if (p.placed && !p.dead && !p.free) atCurb(p);
     }
   }
 
@@ -189,6 +220,11 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       p.restTime = clock + 25 + Math.random() * 45;
       p.socialTime = clock + 5 + Math.random() * 15;
       p._curbNode = null;
+      p.hp = PED_HP;
+      p.dead = p.free = p.puppet = false;
+      p.fleeUntil = p.cowerUntil = 0;
+      p.rig.aimWeight = 0; // (an armed enemy's arms, put down)
+      p.rig.setOutfit(null); // (and a uniform, taken off)
       p.rig.placed = false; // stands afresh where it now is
       p.placed = true;
       if (crosswalk) atCurb(p);
@@ -386,8 +422,11 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     const avoiding = clock < p.avoidUntil;
     const diving = clock - p.diveStart < PEDESTRIAN_DIVE_DURATION;
     const dodging = p.dodge !== 0 || p.dodgeTarget !== 0;
-    const brake = avoiding ? PED_ESCAPE_BRAKE : PED_BRAKE;
+    const fleeing = clock < p.fleeUntil;
+    const cowering = clock < p.cowerUntil + 0.65; // (and getting up again, see renderPed)
+    const brake = avoiding || fleeing ? PED_ESCAPE_BRAKE : PED_BRAKE;
     if (p.pause > 0) p.pause = Math.max(0, p.pause - dt);
+    if (fleeing) p.pause = 0;
     const ahead = p.dir > 0 ? p.len - p.t : p.t;
     const gdx = p.x - p.goalX, gdz = p.z - p.goalZ;
     if (clock >= p.goalTime || gdx * gdx + gdz * gdz < 625) {
@@ -401,12 +440,12 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       p.nextLeg = 0;
       if (!p.node && p.nextRoute) atCurb(p);
     }
-    if (!p.node && p.route?.edge && p.t > 6 && p.t < p.len - 6 && clock >= p.restTime) {
+    if (!fleeing && !p.node && p.route?.edge && p.t > 6 && p.t < p.len - 6 && clock >= p.restTime) {
       p.pause = 1.5 + Math.random() * 3;
       p.restTime = clock + 35 + Math.random() * 55;
     }
-    let vMax = avoiding ? p.avoidSpeed : p.pause > 0 || p.conversation ? 0 : p.speed;
-    if (dodging || diving) p.v = vMax = 0;
+    let vMax = avoiding ? p.avoidSpeed : fleeing ? p.fleeSpeed : p.pause > 0 || p.conversation ? 0 : p.speed;
+    if (dodging || diving || cowering) p.v = vMax = 0;
     if (!p.nextRoute) vMax = Math.min(vMax, Math.sqrt(2 * brake * ahead));
     let room = Infinity;
     if (!p.node && p.nextRoute) {
@@ -456,8 +495,9 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
         const walk = walkOn(p.side, p.node);
         if (!walk) p.walkAt = -1;
         else if (p.walkAt < 0) p.walkAt = clock + p.walkDelay;
-        // React to WALK independently of the queue or vehicles still clearing the crossing.
-        canCross = walk && (avoiding || clock >= p.walkAt) && mayCross(p);
+        // React to WALK independently of the queue or vehicles still clearing the crossing (running from danger,
+        // only the traffic on the crosswalk matters)
+        canCross = fleeing ? mayCross(p) : walk && (avoiding || clock >= p.walkAt) && mayCross(p);
       }
       room = s <= KERB + 1e-6 && !canCross ? Math.max(0, KERB - s) : Infinity;
       for (const q of p.node.curb) {
@@ -468,7 +508,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     }
     if (avoiding) room = Math.min(room, Math.max(0, (p.avoidT - p.t) * p.dir));
     vMax = Math.min(vMax, Math.sqrt(2 * brake * room));
-    p.v += clamp(vMax - p.v, -(avoiding ? brake : 2 * brake) * dt, (avoiding ? PED_ESCAPE_ACCEL : PED_ACCEL) * dt);
+    p.v += clamp(vMax - p.v, -(avoiding ? brake : 2 * brake) * dt, (avoiding || fleeing ? PED_ESCAPE_ACCEL : PED_ACCEL) * dt);
     const movement = diving ? Math.min(Math.abs(p.diveT - p.t), PED_DODGE_SPEED * dt) : Math.min(p.v * dt, room);
     if (p.v * dt > room) p.v = 0;
     let t = p.t + p.dir * movement;
@@ -497,7 +537,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
         p.dir = -p.dir;
         p.walkAt = -1;
         p.v = 0;
-        p.pause = TURN_TIME;
+        p.pause = fleeing ? 0 : TURN_TIME;
       }
     }
     p.t = t;
@@ -545,7 +585,8 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     meetingCells.clear();
     for (let i = 0; i < peds.length; i++) {
       const p = peds[i];
-      if (!p.placed || p.node || !p.route?.edge || p.conversation || clock < p.socialTime || p.t < 6 || p.t > p.len - 6) continue;
+      if (!p.placed || p.dead || p.free || p.node || !p.route?.edge || p.conversation || clock < p.socialTime
+        || clock < p.fleeUntil || p.t < 6 || p.t > p.len - 6) continue;
       const ix = Math.floor(p.x * 0.5), iz = Math.floor(p.z * 0.5);
       let partner = null;
       for (let dx = -1; dx <= 1 && !partner; dx++) {
@@ -585,6 +626,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
   const CROSSWALK_Y = 0.012;
   function pedGround(p, x, z) {
     const ground = terrainHeight(x, z);
+    if (p.free) return blockAt(x, z) ? ground + SIDEWALK_Y : ground; // (off the tracks: the road or a kerbed block)
     if (!p.node) return ground + SIDEWALK_Y;
     const t = (x - p.ax) * p.ux + (z - p.az) * p.uz;
     return ground + (t > 2 && t < p.len - 2 ? CROSSWALK_Y : SIDEWALK_Y);
@@ -594,11 +636,32 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
   // solve their bone transforms and are drawn, the far ones with the light LOD. Walkers also begin turning towards
   // the next leg of their route over its last metre so the body rounds corners instead of swinging about on the spot.
   function renderPed(p, dt) {
-    const draw = !hasView || visible(p.x, p.z, 7);
+    // (tested at the ground's height there: at y = 1 the people on Ponsonby's ridge or K Road, ~50 m up, fell below
+    // the view and vanished in front of the camera)
+    const draw = !hasView || visible(p.x, p.z, 7, terrainHeight(p.x, p.z) + 1);
     const diveTime = clock - p.diveStart;
     const diving = diveTime < PEDESTRIAN_DIVE_DURATION;
     const dx = p.x - focusX, dz = p.z - focusZ;
     const distSq = dx * dx + dz * dz;
+    // The game's poses, through the evasive dive's keyframes: falling dead and lying face down; cowering (crouching
+    // down from standing, held, then rising); a free runner facing where it runs (a puppet where the game faces it);
+    // a free runner knocked flat (knock) through the dive's fall & get-up
+    const knocked = p.free && !p.dead && diving;
+    const posed = p.dead ? Math.min(clock - p.deathTime, DEATH_POSE)
+      : knocked ? diveTime
+        : clock < p.cowerUntil ? 2.2 - Math.min(2.2 - COWER_POSE, (clock - p.cowerStart) * 1.3)
+          : clock - p.cowerUntil < 0.65 ? COWER_POSE + (clock - p.cowerUntil) : -1;
+    if (posed >= 0 || p.free) {
+      if (!draw && distSq > 2500) {
+        p.rig.placed = false;
+        return;
+      }
+      const heading = p.dead ? p.deathYaw : knocked ? p.diveHeading : posed >= 0 ? Math.atan2(p.x - p.fleeX, p.z - p.fleeZ)
+        : p.puppet ? p.puppetYaw : Math.atan2(p.freeVX, p.freeVZ);
+      p.rig.update(dt, p.x, p.z, heading, pedGround, p, 0, draw, posed);
+      if (draw) pedCrowd.add(p.rig, Math.sqrt(distSq));
+      return;
+    }
     if (!draw && !diving && distSq > 2500) {
       p.rig.placed = false;
       return;
@@ -639,6 +702,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     for (let scanned = 0; scanned < NUM_PEDS && pedBudget > 0; scanned++) {
       const p = peds[pedCursor];
       pedCursor = (pedCursor + 1) % NUM_PEDS;
+      if (p.puppet) continue; // (the game's: it takes them back itself)
       if (p.placed) {
         const dx = p.x - focusX, dz = p.z - focusZ;
         if (dx * dx + dz * dz <= keepRadiusSq) continue;
@@ -648,7 +712,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     }
     for (let i = 0; i < NUM_PEDS; i++) {
       const p = peds[i];
-      if (p.placed) avoidPlayer(p);
+      if (p.placed && !p.dead && !p.free && clock >= p.cowerUntil) avoidPlayer(p);
     }
     meet(dt);
     gatherCurbs();
@@ -656,13 +720,276 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     for (let i = 0; i < NUM_PEDS; i++) {
       const p = peds[i];
       if (!p.placed) continue;
-      walk(p, dt);
+      if (p.dead) {
+        // the dead lie a while, and are taken away once nobody sees them (spawning puts them back on the streets)
+        if (clock - p.deathTime > CORPSE_TIME && !nearView(p.x, p.z, 2, 150)) {
+          p.placed = false;
+          continue;
+        }
+      } else if (p.puppet) {
+        runPuppet(p, dt);
+      } else if (p.free) {
+        if (!runFree(p, dt)) continue;
+      } else {
+        walk(p, dt);
+      }
       renderPed(p, dt);
     }
     pedCrowd.end();
   }
 
-  return { peds, meshes: pedCrowd.meshes, update };
+  // ===================================================================================================================
+  // THE GAME (js/game/world.js): hurting, killing and frightening people; drivers thrown out of their cars
+  // ===================================================================================================================
+  let freeCollide = null; // (pos, radius) => moved: keeps free runners out of buildings (the controllers' colliders)
+  const freePos = { x: 0, y: 0, z: 0 };
+
+  /** Everyone placed and alive within `radius` of (x, z) runs away from it for about `duration` s; some cower first */
+  function panic(x, z, radius = 25, duration = 8, cowerShare = 0.25) {
+    const r2 = radius * radius;
+    for (let i = 0; i < NUM_PEDS; i++) {
+      const p = peds[i];
+      if (!p.placed || p.dead) continue;
+      const dx = p.x - x, dz = p.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > r2) continue;
+      scare(p, x, z, duration * (0.8 + Math.random() * 0.5), d2 < r2 * 0.3 && Math.random() < cowerShare);
+    }
+  }
+
+  function scare(p, x, z, duration, cower) {
+    const until = clock + duration;
+    p.fleeX = x;
+    p.fleeZ = z;
+    if (p.free) {
+      p.freeUntil = Math.max(p.freeUntil, until);
+      return;
+    }
+    if (p.conversation) endConversation(p.conversation);
+    if (cower && clock >= p.cowerUntil) {
+      p.cowerStart = clock;
+      p.cowerUntil = clock + 1.8 + Math.random() * 2.4;
+    }
+    const fresh = clock >= p.fleeUntil;
+    p.fleeUntil = Math.max(p.fleeUntil, until + (cower ? 2.5 : 0));
+    // run along the track away from the danger, and from corner to corner towards a goal well beyond it
+    const dist = Math.hypot(p.x - x, p.z - z) || 1;
+    p.goalX = p.x + ((p.x - x) / dist) * 300;
+    p.goalZ = p.z + ((p.z - z) / dist) * 300;
+    p.goalTime = p.fleeUntil;
+    const away = (p.x - x) * p.ux + (p.z - z) * p.uz;
+    const dir = away >= 0 ? 1 : -1;
+    if (fresh && dir !== p.dir && (p.node || p.route?.edge)) turnPed(p, dir);
+    p.pause = 0;
+    p.waiting = false;
+    p.restTime = Math.max(p.restTime, p.fleeUntil + 10);
+    p.socialTime = Math.max(p.socialTime, p.fleeUntil + 20);
+  }
+
+  /** Takes hit points; returns 'killed', 'hurt' or null (already dead / not placed). dir: the blow's direction */
+  function hurt(i, amount, dirX = 0, dirZ = 0) {
+    const p = peds[i];
+    if (!p || !p.placed || p.dead) return null;
+    p.hp -= amount;
+    if (p.hp <= 0) {
+      kill(i, dirX, dirZ);
+      return 'killed';
+    }
+    scare(p, p.x - dirX * 4, p.z - dirZ * 4, 10, false);
+    return 'hurt';
+  }
+
+  /** Falls over (along the blow) and lies there */
+  function kill(i, dirX = 0, dirZ = 0) {
+    const p = peds[i];
+    if (!p || !p.placed || p.dead) return false;
+    if (p.conversation) endConversation(p.conversation);
+    p.hp = 0;
+    p.dead = true;
+    p.puppet = false; // (the game's armed people fall like anyone, and are taken away like anyone)
+    p.deathTime = clock;
+    p.deathYaw = dirX || dirZ ? Math.atan2(dirX, dirZ) : p.rig.yaw;
+    p.v = 0;
+    p.fleeUntil = p.cowerUntil = 0;
+    p.dodge = p.dodgeTarget = 0;
+    p.diveStart = -Infinity;
+    return true;
+  }
+
+  /**
+   * Someone running off the walking tracks from (x, z), away from (fromX, fromZ): a driver thrown out of a car.
+   * Takes a pedestrian nobody is looking at (or the farthest) and returns its index, or -1.
+   */
+  function spawnFree(x, z, fromX, fromZ, seconds = 6) {
+    let best = -1, bestScore = -Infinity;
+    for (let i = 0; i < NUM_PEDS; i++) {
+      const p = peds[i];
+      if (p.free) continue;
+      const d2 = (p.x - x) * (p.x - x) + (p.z - z) * (p.z - z);
+      const score = !p.placed ? 1e12 : p.dead ? -1 : d2 + (nearView(p.x, p.z, 2, 150) ? 0 : 1e9);
+      if (score > bestScore) {
+        bestScore = score;
+        best = i;
+      }
+    }
+    if (best < 0) return -1;
+    const p = peds[best];
+    if (p.conversation) endConversation(p.conversation);
+    let ax = x - fromX, az = z - fromZ;
+    const len = Math.hypot(ax, az) || 1;
+    ax /= len;
+    az /= len;
+    Object.assign(p, { placed: true, free: true, puppet: false, dead: false, hp: PED_HP, node: null, route: null, nextRoute: null, nextLeg: 0 });
+    p.rig.aimWeight = 0;
+    p.rig.setOutfit(null);
+    p.x = x;
+    p.z = z;
+    p.v = 0;
+    p.freeVX = ax * 0.5;
+    p.freeVZ = az * 0.5;
+    p.freeSince = clock;
+    p.freeUntil = clock + seconds;
+    p.fleeX = fromX;
+    p.fleeZ = fromZ;
+    p.fleeUntil = p.cowerUntil = 0;
+    p.avoidUntil = 0;
+    p.dodge = p.dodgeTarget = 0;
+    p.diveStart = -Infinity;
+    p.pause = 0;
+    p.waiting = false;
+    p._curbNode = null;
+    p.rig.placed = false;
+    return best;
+  }
+
+  // Free runners sprint away while frightened, then walk on, until out of sight far enough to be taken back; false
+  // once taken back
+  function runFree(p, dt) {
+    if (clock - p.diveStart < PEDESTRIAN_DIVE_DURATION) return true; // (knocked flat: down, then up again)
+    const running = clock < p.freeUntil;
+    let ax = p.x - p.fleeX, az = p.z - p.fleeZ;
+    const len = Math.hypot(ax, az) || 1;
+    // (keeps running the way it went once well clear, rather than turning about the danger)
+    const steer = len < 25 ? 1 : 0.15;
+    const vx0 = p.freeVX, vz0 = p.freeVZ;
+    const sp0 = Math.hypot(vx0, vz0) || 1;
+    let dx = vx0 / sp0 + (ax / len - vx0 / sp0) * steer;
+    let dz = vz0 / sp0 + (az / len - vz0 / sp0) * steer;
+    const dl = Math.hypot(dx, dz) || 1;
+    dx /= dl;
+    dz /= dl;
+    const target = running ? FREE_RUN_SPEED : 1.4;
+    const speed = sp0 + clamp(target - sp0, -PED_ESCAPE_BRAKE * dt, PED_ESCAPE_ACCEL * dt);
+    p.freeVX = dx * speed;
+    p.freeVZ = dz * speed;
+    freePos.x = p.x + p.freeVX * dt;
+    freePos.z = p.z + p.freeVZ * dt;
+    freePos.y = terrainHeight(freePos.x, freePos.z);
+    if (freeCollide && freeCollide(freePos, 0.35)) {
+      // slid along a wall: keep the speed along it
+      const mx = (freePos.x - p.x) / dt, mz = (freePos.z - p.z) / dt;
+      const ml = Math.hypot(mx, mz);
+      if (ml > 0.2) {
+        p.freeVX = (mx / ml) * speed;
+        p.freeVZ = (mz / ml) * speed;
+      }
+    }
+    p.x = freePos.x;
+    p.z = freePos.z;
+    const dfx = p.x - focusX, dfz = p.z - focusZ;
+    if (!running && clock - p.freeSince > 4 && (dfx * dfx + dfz * dfz > 3600 || clock - p.freeSince > 40) && !nearView(p.x, p.z, 2, 150)) {
+      p.free = false;
+      p.placed = false;
+      return false;
+    }
+    return true;
+  }
+
+  // A puppet (the game's armed people) walks or runs at the velocity the game asks for, eased like a person
+  // speeding up and stopping, kept out of buildings; knocked flat it lies still until it is up again
+  function runPuppet(p, dt) {
+    const down = clock - p.diveStart < PEDESTRIAN_DIVE_DURATION;
+    const k = 1 - Math.exp(-9 * dt);
+    p.freeVX += ((down ? 0 : p.puppetVX) - p.freeVX) * k;
+    p.freeVZ += ((down ? 0 : p.puppetVZ) - p.freeVZ) * k;
+    freePos.x = p.x + p.freeVX * dt;
+    freePos.z = p.z + p.freeVZ * dt;
+    freePos.y = terrainHeight(freePos.x, freePos.z);
+    if (freeCollide) freeCollide(freePos, 0.35);
+    p.x = freePos.x;
+    p.z = freePos.z;
+  }
+
+  /**
+   * The game steers a free person (from spawnFree) from now on (on) or lets it go as an ordinary free runner, who
+   * walks off and is taken back once out of sight (off)
+   */
+  function setPuppet(i, on) {
+    const p = peds[i];
+    if (!p || !p.placed || p.dead) return false;
+    p.puppet = !!on;
+    p.free = true;
+    p.puppetVX = p.puppetVZ = 0;
+    p.puppetYaw = p.rig.yaw;
+    if (!on) {
+      p.freeSince = clock;
+      p.freeUntil = 0;
+      p.fleeX = p.x - Math.sin(p.rig.yaw);
+      p.fleeZ = p.z - Math.cos(p.rig.yaw);
+      p.rig.aimWeight = 0;
+    }
+    return true;
+  }
+
+  /** Knocked flat along (dirX, dirZ) (a punch, a bat, a blast): the evasive dive's fall, a moment down, the get-up */
+  function knock(i, dirX = 0, dirZ = 1) {
+    const p = peds[i];
+    if (!p || !p.placed || p.dead || clock - p.diveStart < PEDESTRIAN_DIVE_DURATION) return false;
+    if (p.conversation) endConversation(p.conversation);
+    p.diveStart = clock;
+    p.diveT = p.t;
+    p.diveHeading = dirX || dirZ ? Math.atan2(dirX, dirZ) : p.rig.yaw;
+    p.dodgeTarget = p.dodge;
+    p.v = 0;
+    p.cowerUntil = 0;
+    return true;
+  }
+
+  /** Dresses a person: setOutfit(id, 'police') puts a free person (spawnFree) in police uniform; null, their own
+   * clothes (put back by themselves when the person is taken back into the crowd). Also `peds[id].outfit = ...` */
+  function setOutfit(i, outfit = null) {
+    const p = peds[i];
+    if (!p) return false;
+    p.rig.setOutfit(outfit);
+    return true;
+  }
+  for (const p of peds) {
+    Object.defineProperty(p, 'outfit', {
+      get() {
+        return this.rig.outfit;
+      },
+      set(v) {
+        this.rig.setOutfit(v);
+      },
+      enumerable: true
+    });
+  }
+
+  return {
+    peds,
+    meshes: pedCrowd.meshes,
+    update,
+    panic,
+    hurt,
+    kill,
+    spawnFree,
+    setPuppet,
+    setOutfit,
+    knock,
+    setFreeCollider: (fn) => {
+      freeCollide = typeof fn === 'function' ? fn : null;
+    }
+  };
 }
 
 export { createPedestrianSystem };

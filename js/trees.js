@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { createTreeMaterial } from './tsl-materials.js';
 import { polygonBoxOverlaps } from './building-collision.js';
+import { terrainHeight } from './terrain.js';
 
 // Seeded street and park trees with three geometry levels, regrouped by spatial cell as the camera moves.
 // Bark tubes and leaf cards share a material; atlas mipmaps preserve leaf coverage at a distance.
@@ -806,6 +807,10 @@ function buildTreeGeometries(speciesIndex, variant, tileMeters) {
 // 5. TREE FIELD: per-tree level of detail, with spatial cells culled separately in the view and shadow passes
 // =====================================================================================================================
 const TREE_CELL_SIZE = 200;
+// The far level (whole-crown cards, beyond LOD_MID) is grouped in cells this many times larger: from a hill or the
+// air hundreds of 200 m cells are in view at that level, each a draw per species & variant per pass, while their
+// instances are cheap (12 triangles a tree), so fewer, fuller draws cost far less CPU for the same picture
+const FAR_CELL_FACTOR = 4;
 const LOD_NEAR = 105; // full detail within (m)
 const LOD_MID = 420; // coarse cards & branches within; whole-crown cards beyond
 const LOD_HYSTERESIS = 6;
@@ -910,6 +915,7 @@ function createTreeField(_scene, sites, colliders = []) {
     l2: [0, 1].map((v) => makeType(geos[s][v][2], `Trees_${sp.name}_v${v}_lod2`))
   }));
   const cells = new Map();
+  const farCells = new Map();
   const meshes = [];
   const counts = [];
 
@@ -952,15 +958,34 @@ function createTreeField(_scene, sites, colliders = []) {
       cells.set(cellKey, cell);
     }
     cell.trees.push(i);
+    const farX = Math.floor(cellX / FAR_CELL_FACTOR);
+    const farZ = Math.floor(cellZ / FAR_CELL_FACTOR);
+    const farKey = (farX + 32768) * 65536 + (farZ + 32768);
+    let far = farCells.get(farKey);
+    if (!far) {
+      const label = `far${farX},${farZ}`;
+      const farGroup = new THREE.Group();
+      farGroup.name = `TreeCell_${label}`;
+      farGroup.visible = false;
+      group.add(farGroup);
+      far = { group: farGroup, label, cells: new Set(), meshes: new Map(), trees: [] };
+      farCells.set(farKey, far);
+    }
+    if (!cell.far) {
+      cell.far = far;
+      far.cells.add(cell);
+    }
+    far.trees.push(i);
     const mi = meshIndex[sp];
     const treeTypes = [mi.l0[variant], mi.l1[variant], mi.l2[variant]];
     for (let l = 0; l < 3; l++) {
       const type = treeTypes[l];
-      let index = cell.meshes.get(type);
+      const owner = l === 2 ? far : cell;
+      let index = owner.meshes.get(type);
       if (index === undefined) {
         index = meshes.length;
-        meshes.push({ type, cell, name: `${type.name}_${cell.label}`, capacity: 0 });
-        cell.meshes.set(type, index);
+        meshes.push({ type, cell: owner, name: `${type.name}_${owner.label}`, capacity: 0, far: l === 2 });
+        owner.meshes.set(type, index);
       }
       meshOf[i * 3 + l] = index;
       meshes[index].capacity++;
@@ -998,7 +1023,7 @@ function createTreeField(_scene, sites, colliders = []) {
       if (r2 > maxR2) maxR2 = r2;
     }
     cell.trees = trees;
-    cell.meshIndices = Int32Array.from(cell.meshes.values());
+    cell.meshIndices = Int32Array.from(cell.meshes.values()); // (its near & mid levels; the far level is its far cell's)
     cell.cx = cx;
     cell.cy = cy;
     cell.cz = cz;
@@ -1027,7 +1052,9 @@ function createTreeField(_scene, sites, colliders = []) {
     mesh.name = m.name;
     mesh.count = 0;
     mesh.visible = false;
-    mesh.castShadow = true;
+    // (the far level starts 420 m out: the sun's cascades reach ~300 m at street level and a crown's shadow some
+    // 20 m, so its casting only cost draws)
+    mesh.castShadow = !m.far;
     mesh.receiveShadow = true;
     m.cell.group.add(mesh);
     m.type.meshes.push(mesh);
@@ -1035,10 +1062,68 @@ function createTreeField(_scene, sites, colliders = []) {
     return mesh;
   });
 
+  // A far cell's meshes are bounded once, by every tree it may hold (re-fitting thousands of instances on each change
+  // of level would cost more than the looser culling)
+  for (const far of farCells.values()) {
+    far.meshIndices = Int32Array.from(far.meshes.values());
+    far.trees = Int32Array.from(far.trees);
+    let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let k = 0; k < far.trees.length; k++) {
+      const i = far.trees[k];
+      minX = Math.min(minX, px[i]); maxX = Math.max(maxX, px[i]);
+      minY = Math.min(minY, py[i]); maxY = Math.max(maxY, py[i]);
+      minZ = Math.min(minZ, pz[i]); maxZ = Math.max(maxZ, pz[i]);
+    }
+    const center = new V3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+    let r2 = 0;
+    for (let k = 0; k < far.trees.length; k++) {
+      const i = far.trees[k];
+      r2 = Math.max(r2, (px[i] - center.x) ** 2 + (py[i] - center.y) ** 2 + (pz[i] - center.z) ** 2);
+    }
+    for (let m = 0; m < far.meshIndices.length; m++) {
+      const mi = far.meshIndices[m];
+      const type = meshes[mi].type;
+      // (the crown cards reach a tree's height from its mid-crown point, at the largest planted scale)
+      const reach = type.geo.boundingSphere.radius * 2.2 + type.windPadding;
+      instanced[mi].boundingSphere = new THREE.Sphere(center, Math.sqrt(r2) + reach);
+    }
+  }
+
   // Repack only cells whose trees changed level; the meshes and their buffer capacities stay fixed.
   const dirtyCells = new Set();
+  const dirtyFar = new Set();
+  function pack(mi, i) {
+    const mesh = instanced[mi];
+    const c = counts[mi]++;
+    const dstM = mesh.instanceMatrix.array;
+    const srcM = i * 16;
+    const dstMOff = c * 16;
+    for (let j = 0; j < 16; j++) dstM[dstMOff + j] = mats[srcM + j];
+    const dstD = mesh.geometry.attributes.aTreeData.array;
+    const srcD = i * 4;
+    const dstDOff = c * 4;
+    dstD[dstDOff] = data[srcD];
+    dstD[dstDOff + 1] = data[srcD + 1];
+    dstD[dstDOff + 2] = data[srcD + 2];
+    dstD[dstDOff + 3] = data[srcD + 3];
+  }
+  function flush(mi) {
+    const mesh = instanced[mi];
+    const n = counts[mi];
+    mesh.count = n;
+    mesh.visible = n > 0;
+    if (n > 0) {
+      for (const attr of [mesh.instanceMatrix, mesh.geometry.attributes.aTreeData]) {
+        attr.clearUpdateRanges();
+        attr.addUpdateRange(0, n * attr.itemSize);
+        attr.needsUpdate = true;
+      }
+    }
+    return n > 0;
+  }
   function rebuild() {
     for (const cell of dirtyCells) {
+      dirtyFar.add(cell.far);
       const mIndices = cell.meshIndices;
       if (cell.uniformLod === 255) {
         for (let m = 0; m < mIndices.length; m++) {
@@ -1056,44 +1141,36 @@ function createTreeField(_scene, sites, colliders = []) {
       for (let k = 0; k < trees.length; k++) {
         const i = trees[k];
         const l = lod[i];
-        if (l === 255) continue;
-        const mi = meshOf[i * 3 + l];
-        const mesh = instanced[mi];
-        const c = counts[mi]++;
-        const dstM = mesh.instanceMatrix.array;
-        const srcM = i * 16;
-        const dstMOff = c * 16;
-        for (let j = 0; j < 16; j++) dstM[dstMOff + j] = mats[srcM + j];
-        const dstD = mesh.geometry.attributes.aTreeData.array;
-        const srcD = i * 4;
-        const dstDOff = c * 4;
-        dstD[dstDOff] = data[srcD];
-        dstD[dstDOff + 1] = data[srcD + 1];
-        dstD[dstDOff + 2] = data[srcD + 2];
-        dstD[dstDOff + 3] = data[srcD + 3];
+        if (l === 255 || l === 2) continue;
+        pack(meshOf[i * 3 + l], i);
       }
       let visible = false;
       for (let m = 0; m < mIndices.length; m++) {
         const mi = mIndices[m];
+        if (!flush(mi)) continue;
+        visible = true;
         const mesh = instanced[mi];
-        const n = counts[mi];
-        mesh.count = n;
-        mesh.visible = n > 0;
-        if (n > 0) {
-          visible = true;
-          for (const attr of [mesh.instanceMatrix, mesh.geometry.attributes.aTreeData]) {
-            attr.clearUpdateRanges();
-            attr.addUpdateRange(0, n * attr.itemSize);
-            attr.needsUpdate = true;
-          }
-          mesh.computeBoundingSphere();
-          mesh.boundingSphere.radius += meshes[mi].type.windPadding;
-        }
+        mesh.computeBoundingSphere();
+        mesh.boundingSphere.radius += meshes[mi].type.windPadding;
       }
       // Hidden cells avoid traversing all their dormant species/variant/LOD meshes in every render pass.
       cell.group.visible = visible;
     }
     dirtyCells.clear();
+    // the far level, by far cell (its bounds are fixed)
+    for (const far of dirtyFar) {
+      const mIndices = far.meshIndices;
+      for (let m = 0; m < mIndices.length; m++) counts[mIndices[m]] = 0;
+      const trees = far.trees;
+      for (let k = 0; k < trees.length; k++) {
+        const i = trees[k];
+        if (lod[i] === 2) pack(meshOf[i * 3 + 2], i);
+      }
+      let visible = false;
+      for (let m = 0; m < mIndices.length; m++) if (flush(mIndices[m])) visible = true;
+      far.group.visible = visible;
+    }
+    dirtyFar.clear();
   }
 
   // Squared LOD and hysteresis thresholds eliminate per-tree Math.sqrt and temporary array allocations.
@@ -1142,7 +1219,9 @@ function createTreeField(_scene, sites, colliders = []) {
     if (cam.distanceToSquared(last) < 16) return false;
     last.copy(cam);
     const camX = cam.x, camY = cam.y, camZ = cam.z;
-    const low = camY < 40;
+    // (street level is near the ground there: Ponsonby's ridge and K Road are 50 m and more above the harbour, and a
+    // camera on them sees no further over the houses than one on Queen Street)
+    const low = camY - Math.max(0, terrainHeight(camX, camZ)) < 40;
     const maxSq = low ? MAX_SQ_LOW : MAX_SQ_ALOFT;
     const maxLoSq = low ? MAX_LO_SQ_LOW : MAX_LO_SQ_ALOFT;
     const maxHiSq = low ? MAX_HI_SQ_LOW : MAX_HI_SQ_ALOFT;

@@ -22,6 +22,7 @@ import { SunLight } from 'three/addons/lights/SunLight.js';
 import { SunLightNode } from 'three/addons/lights/SunLightNode.js';
 import { cityUniforms } from './tsl-materials.js';
 import { terrainHeight } from './terrain.js';
+import { qualityNow } from './quality.js';
 
 // Atmospheric sky, environment lighting, sunlight and time-of-day presets.
 
@@ -201,8 +202,10 @@ class LightingSystem {
     // at 541 m) when their shadows reach several blocks downstream. Shift each cascade camera upstream along its
     // local +Z (sun) axis so every Manhattan tower stays in front of the cascade near plane at any sun elevation.
     const origUpdateMatrices = this.sunLight.shadow.updateMatrices;
+    const lighting = this;
     this.sunLight.shadow.updateMatrices = function (light, viewCamera) {
       if (viewCamera === undefined) return;
+      lighting._shadowView = viewCamera;
       origUpdateMatrices.call(this, light, viewCamera);
       const extra = Math.ceil(550 / Math.max(0.25, this.getCamera(0).matrixWorld.elements[9]));
       for (let i = 0; i < this.getViewportCount(); i++) {
@@ -215,6 +218,16 @@ class LightingSystem {
       }
     };
     this.scene.add(this.sunLight);
+    // The shadow map is drawn when update() asks for it (every frame, or every other on the lower graphics tiers:
+    // see updateShadowSchedule). The cascades and their matrices stay those of the frame the map was drawn in, so a
+    // skipped frame samples a consistent (one frame old) map.
+    this.sunLight.shadow.autoUpdate = false;
+    this.sunLight.shadow.needsUpdate = true;
+    this._shadowView = null; // the camera the cascades were last fitted to
+    this._shadowSkipped = 0;
+    this._shadowPos = new THREE.Vector3(Infinity, 0, 0);
+    this._shadowQuat = new THREE.Quaternion();
+    this.shadowStats = { drawn: 0, skipped: 0 };
 
     // Subtle Hemisphere Sky + Warm Terracotta/Limestone Ground Bounce Fill
     // (Kept intentionally lower than sunLight so urban canyon shadows remain deep and crisp)
@@ -313,7 +326,40 @@ class LightingSystem {
     // logarithmic split (the near cascade ends at ~far / 4). Keep far at 300 m at street level so the near cascade
     // stays sharp, and expand it with altitude (helicopter / observatory) so shadows reach all the way down to street level.
     const altitude = focusPos && Number.isFinite(focusPos.y) ? Math.max(0, focusPos.y - terrainHeight(focusPos.x, focusPos.z)) : 0;
-    this.sunLight.shadow.camera.far = Math.max(220, Math.min(600, 200 + altitude * 1.5));
+    const far = Math.max(220, Math.min(600, 200 + altitude * 1.5));
+    const shadow = this.sunLight.shadow;
+    const refit = far !== shadow.camera.far;
+    shadow.camera.far = far;
+    this.updateShadowSchedule(refit);
+  }
+
+  // Whether the sun's shadow map is drawn this frame. Two cascades of everything around the camera are a third of
+  // the frame's draw calls (and of its CPU time), while the static city's shadows do not change from one frame to the
+  // next: the lower tiers draw them every other frame. The view that moved more than 15 cm or turned more than ~1.2
+  // degrees since the last map (a car at speed, a quick look round) still gets one every frame (shadowFollow), so the
+  // cascades always cover the view and the player's own shadow keeps up; what lags a frame is the shadow of
+  // something moving past a still view.
+  updateShadowSchedule(force = false) {
+    const shadow = this.sunLight.shadow;
+    const tier = qualityNow.tier;
+    const every = tier?.shadowEvery || 1;
+    const cam = this._shadowView;
+    let due = force || every <= 1 || !cam || this._shadowSkipped + 1 >= every;
+    if (!due && tier.shadowFollow !== false) {
+      due = cam.position.distanceToSquared(this._shadowPos) > 0.0225 || cam.quaternion.angleTo(this._shadowQuat) > 0.021;
+    }
+    if (due) {
+      shadow.needsUpdate = true;
+      this._shadowSkipped = 0;
+      this.shadowStats.drawn++;
+      if (cam) {
+        this._shadowPos.copy(cam.position);
+        this._shadowQuat.copy(cam.quaternion);
+      }
+    } else {
+      this._shadowSkipped++;
+      this.shadowStats.skipped++;
+    }
   }
 }
 

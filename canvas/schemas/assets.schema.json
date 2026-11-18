@@ -1,0 +1,125 @@
+{
+  "type": "object",
+  "required": [
+    "version",
+    "assets"
+  ],
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "assets": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9_-]{1,120}$": {
+          "type": "object",
+          "required": [
+            "name",
+            "path"
+          ],
+          "properties": {
+            "audio": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": true
+            },
+            "model3d": {
+              "type": "object",
+              "required": [
+                "triangles",
+                "textured",
+                "rigged",
+                "animations"
+              ],
+              "properties": {
+                "triangles": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "textured": {
+                  "type": "boolean"
+                },
+                "rigged": {
+                  "type": "boolean"
+                },
+                "animations": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "forwardAxis": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "+X"
+                    },
+                    {
+                      "type": "string",
+                      "const": "+Z"
+                    }
+                  ]
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "operation": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "image"
+                    },
+                    {
+                      "type": "string",
+                      "const": "text"
+                    },
+                    {
+                      "type": "string",
+                      "const": "retexture"
+                    },
+                    {
+                      "type": "string",
+                      "const": "remesh"
+                    },
+                    {
+                      "type": "string",
+                      "const": "animate"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000,
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+"
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "libraryAssetId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "maxProperties": 10000
+    }
+  },
+  "additionalProperties": false
+}

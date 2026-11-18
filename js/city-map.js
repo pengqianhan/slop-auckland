@@ -428,6 +428,16 @@ class CityMapSystem {
     // Start with a waypoint at the Sky Tower.
     this.waypoint = { x: SKY_TOWER.x + 60, z: SKY_TOWER.z - 40, name: 'Sky Tower' };
 
+    // Hooks for the game's HUD (js/game/ui.js), which draws its own radar from drawGround() and uses the full map as
+    // its pause-menu map: the ground colours, what a click on the map does instead of teleporting, what the map
+    // draws over itself every frame (blips, the GPS route), and who hears it open & close
+    this.palette = MAP;
+    this.onPick = null; // (x, z, pointerEvent) => void
+    this.pickHint = 'Click to teleport here';
+    this.drawOverlay = null; // (ctx, view) => void, in the view's screen transform (view.toX / view.toY)
+    this.minimapEnabled = true;
+    this.toggleListeners = [];
+
     // Street names measured before the web font arrived would be spaced for the fallback font: measure & draw again
     if (document.fonts) {
       document.fonts.ready.then(() => {
@@ -537,7 +547,7 @@ class CityMapSystem {
         if (mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height) {
           const wPos = this.screenToWorld(mx, my, rect.width, rect.height);
           if (this.elHoverInfo) {
-            this.elHoverInfo.textContent = `${getLocationLabel(wPos.x, wPos.z)} · Click to teleport here`;
+            this.elHoverInfo.textContent = `${getLocationLabel(wPos.x, wPos.z)} · ${this.pickHint}`;
           }
         }
       });
@@ -552,6 +562,11 @@ class CityMapSystem {
           const my = e.clientY - rect.top;
           if (mx >= 0 && mx <= rect.width && my >= 0 && my <= rect.height) {
             const wPos = this.clampToManhattan(this.screenToWorld(mx, my, rect.width, rect.height));
+            if (this.onPick) {
+              this.onPick(wPos.x, wPos.z, e);
+              this.renderFullMap();
+              return;
+            }
             this.waypoint = {
               x: wPos.x,
               z: wPos.z,
@@ -638,9 +653,11 @@ class CityMapSystem {
   }
 
   toggleFullMap(open) {
+    const was = this.isFullMapOpen;
     this.isFullMapOpen = Boolean(open);
     if (!this.isFullMapOpen) this.cancelPan();
     if (this.onToggle) this.onToggle(this.isFullMapOpen);
+    if (was !== this.isFullMapOpen) for (const fn of this.toggleListeners) fn(this.isFullMapOpen);
     if (!this.modal) return;
     this.modal.classList.toggle('hidden', !this.isFullMapOpen);
     if (this.isFullMapOpen) {
@@ -704,6 +721,7 @@ class CityMapSystem {
    */
   drawWorld(ctx, v, isMinimap) {
     const L = mapLayers();
+    const MAP = this.palette;
     const s = v.s;
     const px = (n) => n / s; // screen pixels -> metres (line widths)
     v.world(ctx);
@@ -901,7 +919,7 @@ class CityMapSystem {
   // 1. LIVE MINIMAP (BOTTOM-LEFT HUD)
   // =========================================================================
   renderMinimap() {
-    if (!this.miniCtx || !this.miniCanvas) return;
+    if (!this.miniCtx || !this.miniCanvas || !this.minimapEnabled) return;
     // Nothing to draw while the radar is hidden (narrow screens, clean view)
     if (!this.miniCanvas.offsetParent || document.body.classList.contains('hud-minimized')) return;
     const ctx = this.miniCtx;
@@ -1070,6 +1088,12 @@ class CityMapSystem {
       drawRoute(ctx, toX(ent.position.x), toY(ent.position.z), wx, wy, 4);
       drawWaypoint(ctx, wx, wy, 7);
     }
+    // the game's blips & GPS route (the player's arrow stays on top)
+    if (this.drawOverlay) {
+      ctx.save();
+      this.drawOverlay(ctx, v);
+      ctx.restore();
+    }
 
     // Live Player Blip & Heading Arrow, with a slow pulse to find it at a glance
     const px = toX(ent.position.x);
@@ -1098,7 +1122,7 @@ class CityMapSystem {
     ctx.save();
     // 1. Harbor & River Water Base
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = MAP.water;
+    ctx.fillStyle = this.palette.water;
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
     // 2. The ground: boroughs, islands, Manhattan's blocks, parks, footprints, highways & bridges
@@ -1185,6 +1209,24 @@ class CityMapSystem {
     ctx.restore();
   }
 
+  /**
+   * The map's ground (water, land, blocks, parks, buildings, motorways) for the square of w x h canvas pixels centred
+   * on (cx, cz) at s pixels per metre, north up: the game's radar caches these as tiles and turns them itself
+   */
+  drawGround(ctx, cx, cz, s, w, h) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = this.palette.water;
+    ctx.fillRect(0, 0, w, h);
+    this.drawWorld(ctx, new MapView(cx, cz, s, w, h, 1), true);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** Changes when the building footprints the ground is drawn with change (cached renders of it are stale) */
+  get groundVersion() {
+    const fp = footprintLayers(this.allBlocks);
+    return fp ? fp.version : 0;
+  }
+
   drawScaleBar(ctx, v) {
     const target = 120 / v.s; // metres in ~120 px
     const pow = Math.pow(10, Math.floor(Math.log10(target)));
@@ -1216,4 +1258,4 @@ class CityMapSystem {
   }
 }
 
-export { CityMapSystem };
+export { CityMapSystem, MAP as MAP_PALETTE };

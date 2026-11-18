@@ -65,16 +65,53 @@
   <link rel="modulepreload" href="./js/audio-sources.js" />
   <link rel="modulepreload" href="./js/audio-acoustics.js" />
   <link rel="modulepreload" href="./js/audio-system.js" />
+  <link rel="modulepreload" href="./js/game/audio-sfx.js" />
+  <link rel="modulepreload" href="./js/game/audio-music.js" />
+  <link rel="modulepreload" href="./js/game/audio.js" />
+  <link rel="modulepreload" href="./js/game/radio.js" />
+  <link rel="modulepreload" href="./js/game/core.js" />
+  <link rel="modulepreload" href="./js/game/save.js" />
+  <link rel="modulepreload" href="./js/game/input.js" />
+  <link rel="modulepreload" href="./js/game/ui.js" />
+  <link rel="modulepreload" href="./js/game/menus.js" />
+  <link rel="modulepreload" href="./js/game/hud/hud.js" />
+  <link rel="modulepreload" href="./js/game/hud/cards.js" />
+  <link rel="modulepreload" href="./js/game/hud/radar.js" />
+  <link rel="modulepreload" href="./js/game/hud/gps.js" />
+  <link rel="modulepreload" href="./js/game/hud/tips.js" />
+  <link rel="modulepreload" href="./js/game/world.js" />
+  <link rel="modulepreload" href="./js/game/fx.js" />
+  <link rel="modulepreload" href="./js/game/player.js" />
+  <link rel="modulepreload" href="./js/game/vehicles.js" />
+  <link rel="modulepreload" href="./js/game/weapons.js" />
+  <link rel="modulepreload" href="./js/game/combat.js" />
+  <link rel="modulepreload" href="./js/game/wanted.js" />
+  <link rel="modulepreload" href="./js/game/police.js" />
+  <link rel="modulepreload" href="./js/game/blips.js" />
+  <link rel="modulepreload" href="./js/game/pickups.js" />
+  <link rel="modulepreload" href="./js/game/economy.js" />
+  <link rel="modulepreload" href="./js/game/activities.js" />
+  <link rel="modulepreload" href="./js/game/missions/stats.js" />
+  <link rel="modulepreload" href="./js/game/missions/driver.js" />
+  <link rel="modulepreload" href="./js/game/missions/markers.js" />
+  <link rel="modulepreload" href="./js/game/missions/places.js" />
+  <link rel="modulepreload" href="./js/game/missions/phone.js" />
+  <link rel="modulepreload" href="./js/game/missions/steps.js" />
+  <link rel="modulepreload" href="./js/game/missions/story.js" />
+  <link rel="modulepreload" href="./js/game/missions.js" />
+  <link rel="modulepreload" href="./js/game/index.js" />
   <link rel="modulepreload" href="./js/main.js" />
   <link rel="preload" href="./js/terrain-geodata.bin.gz" as="fetch" crossorigin />
   <link rel="preload" href="./js/tree-geodata.bin.gz" as="fetch" crossorigin />
   <link rel="preload" href="./js/building-geodata.bin.gz" as="fetch" crossorigin />
   <script type="module" src="./js/main.js"></script>
+  <script>if (/[?&]sandbox(=|&|$)/.test(location.search)) document.documentElement.classList.add('akl-sandbox');</script>
   <!-- Inter (UI) & Overpass (street-name signs: modelled on Highway Gothic, the US road sign typeface) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..800&amp;family=Overpass:wght@600;700&amp;display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..800&amp;family=Overpass:wght@600;700&amp;family=Big+Shoulders+Display:wght@800;900&amp;family=Barlow+Condensed:wght@500;600;700;800&amp;family=JetBrains+Mono:wght@500;700;800&amp;display=swap" />
   <link rel="stylesheet" href="./css/style.css?v=akl-5" />
+  <link rel="stylesheet" href="./css/game.css?v=cos-1" />
 </head>
 <body>
   <!-- Icon sprite (24 × 24 stroke icons, drawn in currentColor) -->
@@ -114,6 +151,7 @@
     <div class="loader">
       <span class="mta-bullet loader-bullet" aria-hidden="true">AK</span>
       <div class="loader-title">Slop Auckland</div>
+      <div class="g-logo loader-logo" aria-hidden="true"><span class="g-logo-city">City of</span><span class="g-logo-steals">Steals</span></div>
       <div class="loader-track" aria-hidden="true"><span id="loading-progress" class="loader-fill"></span></div>
       <div id="loading-status">Loading city code and data...</div>
     </div>

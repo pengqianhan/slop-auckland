@@ -356,9 +356,13 @@ export function createMotorVoice(context, resources, kind, output) {
     const lowBankGain = gain(1), highBankGain = gain();
     const exhaustFilter = filter('lowpass', 500, 0.65);
     const exhaustGain = gain();
+    // A damaged engine (game/audio.js: smoking or burning) misfires: brief cuts of the exhaust on this gain alone,
+    // so they never fight the smoothed level above, and a loose rattle joins once (made on first need)
+    const misfireGain = gain(1);
     exhaust.connect(lowBankGain).connect(exhaustFilter);
     highExhaust.connect(highBankGain).connect(exhaustFilter);
-    exhaustFilter.connect(exhaustGain).connect(mix);
+    exhaustFilter.connect(exhaustGain).connect(misfireGain).connect(mix);
+    let rattleGain = null, rattleRate = null, rattleLevel = null, nextMisfire = 0;
     const mechanism = loop(sound.mechanical);
     const mechanismFilter = filter('bandpass', bus ? 1400 : 1700, 0.45);
     const mechanismGain = gain();
@@ -380,7 +384,7 @@ export function createMotorVoice(context, resources, kind, output) {
     const roadLevel = smoothParameter(roadGain.gain, 0.18);
     const roadFrequency = smoothParameter(roadLowpass.frequency, 0.18, 1);
     const noiseRate = smoothParameter(road.playbackRate, 0.12, 0.001);
-    render = (speed, load, doppler, now) => {
+    render = (speed, load, doppler, now, verticalSpeed, damage) => {
       const first = previousTime < 0;
       const dt = first ? 0.1 : clamp(now - previousTime, 0, 0.5);
       previousTime = now;
@@ -444,6 +448,28 @@ export function createMotorVoice(context, resources, kind, output) {
       roadLevel(Math.pow(rolling, 1.25) * (bus ? 0.16 : 0.10), now);
       roadFrequency((900 + Math.min(1, rolling) * 1000) * doppler, now);
       noiseRate(doppler * (0.96 + variation * 0.08), now);
+      if (damage > 0 && !rattleGain) {
+        const rattle = loop(resources.ratchet);
+        const rattleFilter = filter('bandpass', 900, 0.8);
+        rattleGain = gain();
+        rattle.connect(rattleFilter).connect(rattleGain).connect(mix);
+        rattle.start(now);
+        rattleRate = smoothParameter(rattle.playbackRate, 0.1, 0.001, true);
+        rattleLevel = smoothParameter(rattleGain.gain, 0.2);
+      }
+      if (rattleGain) {
+        rattleRate(Math.max(0.05, rpm / 2400) * doppler, now);
+        rattleLevel(damage * (0.05 + effort * 0.09), now);
+      }
+      // misfires: a few per second when badly damaged, more under load
+      if (damage > 0 && now >= nextMisfire && speed + effort > 0.05) {
+        const g = misfireGain.gain;
+        const at = now + Math.random() * 0.08;
+        g.setValueAtTime(1, at);
+        g.linearRampToValueAtTime(0.15, at + 0.012);
+        g.setTargetAtTime(1, at + 0.05 + Math.random() * 0.06, 0.02);
+        nextMisfire = now + (0.25 + Math.random() * 1.2) / (0.4 + damage * (0.6 + effort));
+      }
     };
   } else if (kind === 'helicopter') {
     const rotor = loop(resources.rotor);
@@ -552,10 +578,12 @@ export function createMotorVoice(context, resources, kind, output) {
     render = (speed, load, doppler, now) => {
       const pitch = (0.98 + variation * 0.04) * doppler;
       sirenFrequency(1125 * pitch, now);
+      // Responding cars (the game's chases) alternate wail and yelp every several seconds, each on its own cycle
       sweepRange(425 * pitch, now);
       // Hold a long wail, then briefly select yelp. Different cars switch independently; the oscillator
       // keeps its phase through a change, and Doppler shifts both the pitch and the sweep cadence.
-      const yelp = (now + variation * 24) % 24 >= 19;
+      const cycle = 9 + variation * 6;
+      const yelp = (now + variation * 24) % cycle >= cycle - 3.2;
       sweepFrequency((yelp ? 3 : 0.2) * (0.97 + variation * 0.06) * doppler, now);
       sirenLevel(0.09, now);
       envelopeLevel(0.01, now);
@@ -564,7 +592,7 @@ export function createMotorVoice(context, resources, kind, output) {
     };
   }
 
-  function update({ speed = 0, load = 0, doppler = 1, seed = 0, verticalSpeed = 0 } = {}, now = context.currentTime) {
+  function update({ speed = 0, load = 0, doppler = 1, seed = 0, verticalSpeed = 0, damage = 0 } = {}, now = context.currentTime) {
     if (disposed) return;
     const safeSeed = Number.isFinite(seed) ? seed : 0;
     if (safeSeed !== lastSeed) {
@@ -578,7 +606,8 @@ export function createMotorVoice(context, resources, kind, output) {
       Number.isFinite(load) ? clamp(load, 0, 1) : 0,
       Number.isFinite(doppler) ? clamp(doppler, 0.5, 2) : 1,
       time,
-      Number.isFinite(verticalSpeed) ? clamp(verticalSpeed, -30, 30) : 0
+      Number.isFinite(verticalSpeed) ? clamp(verticalSpeed, -30, 30) : 0,
+      Number.isFinite(damage) ? clamp(damage, 0, 1) : 0
     );
   }
 

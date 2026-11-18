@@ -76,10 +76,16 @@ function driveSpeed(speed, throttle, dt, drive) {
 // Walking surface for the player's pedestrian (its rig samples it around its feet)
 const personGround = (controllers, x, z) => controllers.getGroundHeight(x, z, 'person');
 
-function collisionBody(mode, radius, heading, margin = 0) {
+// On foot in the game (js/game): jog, sprint and aim-walk speeds (m/s), and how fast the body turns (rad/s)
+const ON_FOOT = { run: 4.8, sprint: 7.6, aim: 2.5, crouch: 1.9, accel: 17, aimAccel: 24, airControl: 0.18, turn: 11, sprintTurn: 7.5, aimTurn: 18 };
+const wrapAngle = (a) => a - Math.round(a / (Math.PI * 2)) * Math.PI * 2;
+const STUCK_TIME = 4; // s on the throttle both ways without getting anywhere before a wedged car is lifted out
+
+// Cars: the taxi's half width & length unless the entity carries its own (the game's other body kinds)
+function collisionBody(mode, radius, heading, margin = 0, halfW = 0.86, halfL = 2.18) {
   const car = mode === 'car';
   const sin = Math.sin(heading), cos = Math.cos(heading);
-  const hx = 0.86 + margin, hz = 2.18 + margin;
+  const hx = halfW + margin, hz = halfL + margin;
   return {
     car, sin, cos, hx, hz, radius: radius + margin,
     extX: car ? Math.abs(cos) * hx + Math.abs(sin) * hz : radius + margin,
@@ -201,6 +207,13 @@ class ThirdPersonControllerManager {
     this.colliders = colliders;
     this._colliderCells = null; // built on first use, see nearColliders()
     this.activeMode = 'car'; // 'person' | 'car' | 'cyclist' | 'helicopter' | 'kiwi'
+    this._collisionListeners = [];
+    // The game (js/game) sets gameMode: the one player character walks camera-relative (personControl, fed every
+    // frame by game/player.js), the idle pedestrian no longer wanders, and parked vehicles stand still. Codes in
+    // reservedCodes (game actions on foot: weapon switching, crouch) do not move the person.
+    this.gameMode = false;
+    this.personControl = { enabled: true, yaw: 0, aiming: false, sprint: false, crouch: false, speedScale: 1 };
+    this.reservedCodes = null;
 
     this.keys = {
       forward: false,
@@ -238,19 +251,42 @@ class ThirdPersonControllerManager {
     this.bindKeyboard();
   }
 
+  // The audio's listener (one, replaceable, as before); other systems add theirs with addCollisionListener
   setCollisionListener(listener) {
     this._collisionListener = typeof listener === 'function' ? listener : null;
     this._collisionEvent ??= { a: null, b: null, kind: '', x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, speed: 0 };
   }
 
+  /** Another collision listener alongside the audio's; returns a function that removes it */
+  addCollisionListener(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this._collisionEvent ??= { a: null, b: null, kind: '', x: 0, y: 0, z: 0, nx: 0, ny: 0, nz: 0, speed: 0 };
+    this._collisionListeners.push(listener);
+    return () => {
+      this._collisionListeners = this._collisionListeners.filter((l) => l !== listener);
+    };
+  }
+
+  get hasCollisionListeners() {
+    return !!this._collisionListener || this._collisionListeners.length > 0;
+  }
+
   // Reuse one synchronous event; consumers must copy retained fields. Normal points from b toward a.
   reportCollision(a, b, kind, x, y, z, nx, ny, nz, speed) {
-    if (!this._collisionListener || speed <= 0.5) return;
+    if (!this.hasCollisionListeners || speed <= 0.5) return;
     const event = this._collisionEvent;
     event.a = a; event.b = b; event.kind = kind;
     event.x = x; event.y = y; event.z = z;
     event.nx = nx; event.ny = ny; event.nz = nz; event.speed = speed;
-    this._collisionListener(event);
+    if (this._collisionListener) this._collisionListener(event);
+    const listeners = this._collisionListeners;
+    for (let i = 0; i < listeners.length; i++) listeners[i](event);
+  }
+
+  /** The game's vehicle layer swaps in whichever car (or other vehicle) the player now drives */
+  setEntity(mode, entity) {
+    if (!Object.hasOwn(this.entities, mode) || !entity) return;
+    this.entities[mode] = entity;
   }
 
   bindKeyboard() {
@@ -271,6 +307,8 @@ class ThirdPersonControllerManager {
     const onKey = (e, isDown) => {
       const action = actionsByCode.get(e.code);
       if (!action || (isDown && isTypingInField(e))) return;
+      // (in the game, Q / E / C are weapon & crouch keys on foot: they don't move the person, but still fly)
+      if (isDown && this.reservedCodes?.has(e.code) && this.activeMode === 'person') return;
       if (isDown) this._pressedCodes.add(e.code);
       else this._pressedCodes.delete(e.code);
       // Releasing one binding must not cancel another key held for the same action.
@@ -829,6 +867,7 @@ class ThirdPersonControllerManager {
 
     const blurDisc = new THREE.Mesh(new THREE.CylinderGeometry(4.85, 4.85, 0.015, 32), blurDiscMat);
     mainRotorPivot.add(blurDisc);
+    // (the game spins the rotors down when the helicopter is parked: rotorSpeed 0..1, the blur disc only while fast)
     tiltPivot.add(mainRotorPivot);
 
     // 3. 4-Blade Tail Rotor Assembly on Swept Vertical Fin
@@ -866,6 +905,8 @@ class ThirdPersonControllerManager {
       tiltPivot,
       mainRotorPivot,
       tailRotorPivot,
+      rotorBlur: blurDisc,
+      rotorSpeed: 1,
       position: new THREE.Vector3(spawnAt(-160, 60).x, terrainHeight(SPAWN.x, SPAWN.z) + FLYING.helicopter.start, spawnAt(-160, 60).z),
       heading: SPAWN.heading,
       speed: 0,
@@ -931,6 +972,33 @@ class ThirdPersonControllerManager {
   isOnDeck(x, z, y) {
     const deck = deckHeight(x, z, y, 3, 1.0);
     return deck > terrainHeight(x, z) + 0.3 && Math.abs(deck - y) < 3;
+  }
+
+  /** Is a standing body of `radius` at (x, y, z) clear of every building, wall and parapet? (game exits, respawns) */
+  isClear(x, z, y, radius = 0.45, top = 1.9) {
+    const body = this._probeBody ??= { car: false, radius: 0, extX: 0, extZ: 0, bottom: 0, top: 0 };
+    body.radius = body.extX = body.extZ = radius;
+    body.top = top;
+    const near = this.nearColliders(x, z, radius + 1);
+    for (let i = 0; i < near.length; i++) if (buildingContact(near[i], x, y, z, body)) return false;
+    return true;
+  }
+
+  /** Push a standing body at pos ({ x, y, z }) out of the buildings it overlaps; true if it moved (game pedestrians) */
+  pushOutOfBuildings(pos, radius = 0.4, top = 1.8) {
+    const body = this._probeBody ??= { car: false, radius: 0, extX: 0, extZ: 0, bottom: 0, top: 0 };
+    body.radius = body.extX = body.extZ = radius;
+    body.top = top;
+    const contact = this._probeContact ??= { nx: 0, nz: 0, depth: 0 };
+    let moved = false;
+    const near = this.nearColliders(pos.x, pos.z, radius + 6);
+    for (let i = 0; i < near.length; i++) {
+      if (!buildingContact(near[i], pos.x, pos.y, pos.z, body, contact)) continue;
+      pos.x += contact.nx * contact.depth;
+      pos.z += contact.nz * contact.depth;
+      moved = true;
+    }
+    return moved;
   }
 
   // A vehicle on the road: its height follows the surface under it (eased, so kerbs are a bump and not a jump) and
@@ -1017,12 +1085,13 @@ class ThirdPersonControllerManager {
       } else {
         pos.x = Math.max(ISLAND_BOUNDS.minX + 2, Math.min(ISLAND_BOUNDS.maxX - 2, pos.x));
         pos.z = Math.max(ISLAND_BOUNDS.minZ + 2, Math.min(ISLAND_BOUNDS.maxZ - 2, pos.z));
-        if (keepAshore(pos, 8) && carEntity && carEntity.speed) carEntity.speed *= 0.4;
+        // (overWater: someone the game lets fall into the harbour, out of a helicopter)
+        if (!(entity && entity.overWater) && keepAshore(pos, 8) && carEntity && carEntity.speed) carEntity.speed *= 0.4;
       }
     }
     if (entity && entity._onDeck) (entity.prevDeck ??= { x: 0, z: 0 }).x = pos.x, entity.prevDeck.z = pos.z;
 
-    const body = collisionBody(mode, radius, carEntity ? carEntity.heading : 0);
+    const body = collisionBody(mode, radius, carEntity ? carEntity.heading : 0, 0, carEntity?.halfW, carEntity?.halfL);
     const { sin: sinH, cos: cosH, extX, extZ } = body;
     const contact = this._buildingContact ??= { nx: 0, nz: 0, depth: 0 };
 
@@ -1038,11 +1107,11 @@ class ThirdPersonControllerManager {
         pos.z += nz * depth;
 
         // (a bird against a wall makes no crash)
-        if (this._collisionListener && entity && entity.type !== 'person' && entity.type !== 'kiwi') {
+        if (this.hasCollisionListeners && entity && entity.type !== 'person' && entity.type !== 'kiwi') {
           const sin = carEntity ? sinH : Math.sin(entity.heading);
           const cos = carEntity ? cosH : Math.cos(entity.heading);
           const approachSpeed = -((sin * entity.speed + (entity.vx || 0)) * nx + (cos * entity.speed + (entity.vz || 0)) * nz);
-          const support = carEntity ? Math.abs(nx * cos - nz * sin) * 0.86 + Math.abs(nx * sin + nz * cos) * 2.18 : radius;
+          const support = carEntity ? Math.abs(nx * cos - nz * sin) * body.hx + Math.abs(nx * sin + nz * cos) * body.hz : radius;
           this.reportCollision(entity, c, 'building', pos.x - nx * support, pos.y + (heli ? 1.1 : 0.56), pos.z - nz * support,
             nx, 0, nz, approachSpeed);
         }
@@ -1103,7 +1172,8 @@ class ThirdPersonControllerManager {
     if (p) {
       const dx = focus ? p.position.x - focus.x : 0;
       const dz = focus ? p.position.z - focus.z : 0;
-      if (this.activeMode === 'person' || dx * dx + dz * dz <= maxDistSq) {
+      // (p.hidden: the game's player sitting in a vehicle)
+      if (!p.hidden && (this.activeMode === 'person' || dx * dx + dz * dz <= maxDistSq)) {
         p._charHidden = false;
         if (p.mesh) p.mesh.visible = true;
         const groundY = this.getGroundHeight(p.position.x, p.position.z, 'person');
@@ -1114,7 +1184,8 @@ class ThirdPersonControllerManager {
           const sScale = Math.max(0.45, 1 - Math.max(0, jumpAir) * 0.35);
           p.shadow.scale.set(sScale, sScale, 1);
         }
-        p.rig.update(dt, p.position.x, p.position.z, p.heading, personGround, this, jumpAir);
+        // poseDive >= 0: the game's knock-down / lying-dead pose (seconds into the pedestrians' evasive dive)
+        p.rig.update(dt, p.position.x, p.position.z, p.heading, personGround, this, jumpAir, true, p.poseDive >= 0 ? p.poseDive : -1);
         p.crowd.begin();
         p.crowd.add(p.rig, 0);
         p.crowd.end();
@@ -1133,7 +1204,8 @@ class ThirdPersonControllerManager {
     if (b) {
       const dx = focus ? b.position.x - focus.x : 0;
       const dz = focus ? b.position.z - focus.z : 0;
-      if (this.activeMode === 'cyclist' || dx * dx + dz * dz <= maxDistSq) {
+      // (riderless: the game's bicycle standing parked)
+      if (!b.riderless && (this.activeMode === 'cyclist' || dx * dx + dz * dz <= maxDistSq)) {
         if (b.helmet) b.helmet.visible = true;
         const moved =
           this.activeMode === 'cyclist' ||
@@ -1173,12 +1245,14 @@ class ThirdPersonControllerManager {
 
   update(dt, elapsed, focusPos = null) {
     const heli = this.entities.helicopter;
-    heli.mainRotorPivot.rotation.y += dt * 24.0;
-    heli.tailRotorPivot.rotation.x += dt * 32.0;
+    const rotor = heli.rotorSpeed ?? 1;
+    heli.mainRotorPivot.rotation.y += dt * 24.0 * rotor;
+    heli.tailRotorPivot.rotation.x += dt * 32.0 * rotor;
+    if (heli.rotorBlur) heli.rotorBlur.visible = rotor > 0.35;
 
     if (this.activeMode === 'person') {
       this.updatePerson(dt, elapsed);
-    } else {
+    } else if (!this.gameMode) {
       // Keep the sidewalk pedestrian walking naturally on the ground when not actively controlled
       const p = this.entities.person;
       const walkSpeed = 1.48;
@@ -1223,8 +1297,8 @@ class ThirdPersonControllerManager {
     const car = this.entities.car;
     if (car.headLights) {
       for (const spot of car.headLights) {
-        // Accelerating does not change the headlamp output or range.
-        spot.intensity = HEADLIGHTS.intensity * beamScale;
+        // Accelerating does not change the headlamp output or range. (Off in a car the game has parked.)
+        spot.intensity = car.engineOff ? 0 : HEADLIGHTS.intensity * beamScale;
       }
     }
     const bike = this.entities.cyclist;
@@ -1239,6 +1313,10 @@ class ThirdPersonControllerManager {
   updatePerson(dt) {
     if (dt <= 0) return;
     const p = this.entities.person;
+    if (this.gameMode) {
+      this.updatePersonGame(dt, p, this.personControl);
+      return;
+    }
     const maxSpeed = 8.2;
     const turnRate = 2.6;
 
@@ -1272,9 +1350,82 @@ class ThirdPersonControllerManager {
       else if (p.speed < 0 && actualFwd > p.speed) p.speed = Math.min(0, actualFwd);
     }
 
+    this.personVertical(p, dt, this.keys.up);
+  }
+
+  // The game's player on foot: W runs away from the camera (personControl.yaw), the body turning towards where it
+  // runs; aiming, it faces where the camera looks and strafes at a walk; sprinting is faster and turns wider. The
+  // velocity eases with bounded acceleration, so starts, stops and turns read as weight; little control in the air.
+  updatePersonGame(dt, p, ctl) {
+    const k = this.keys;
+    let ix = 0, iz = 0;
+    if (ctl.enabled) {
+      ix = (+k.right || 0) - (+k.left || 0);
+      iz = (+k.forward || 0) - (+k.backward || 0);
+    }
+    let amount = Math.hypot(ix, iz);
+    if (amount > 1) {
+      ix /= amount;
+      iz /= amount;
+      amount = 1;
+    }
+    const fx = Math.sin(ctl.yaw), fz = Math.cos(ctl.yaw);
+    // the camera's right is (-fz, fx): heading grows to the left
+    const wx = fx * iz - fz * ix;
+    const wz = fz * iz + fx * ix;
+    const top = !ctl.enabled ? 0 : ctl.aiming ? ON_FOOT.aim : ctl.crouch ? ON_FOOT.crouch : ctl.sprint ? ON_FOOT.sprint : ON_FOOT.run;
+    const speedTarget = top * (ctl.speedScale ?? 1);
+    const airborne = p.jumping || p.jumpPrep > 0;
+    const accel = (ctl.aiming ? ON_FOOT.aimAccel : ON_FOOT.accel) * (airborne ? ON_FOOT.airControl : 1);
+    let vx = p.velX || 0, vz = p.velZ || 0;
+    const ddx = wx * speedTarget - vx, ddz = wz * speedTarget - vz;
+    const dl = Math.hypot(ddx, ddz), maxStep = accel * dt;
+    if (dl > maxStep) {
+      vx += (ddx / dl) * maxStep;
+      vz += (ddz / dl) * maxStep;
+    } else {
+      vx += ddx;
+      vz += ddz;
+    }
+
+    let want = null;
+    if (ctl.aiming) want = ctl.yaw;
+    else if (amount > 0.05 && ctl.enabled) want = Math.atan2(wx, wz);
+    if (want !== null) {
+      const rate = ctl.aiming ? ON_FOOT.aimTurn : ctl.sprint ? ON_FOOT.sprintTurn : ON_FOOT.turn;
+      p.heading += wrapAngle(want - p.heading) * (1 - Math.exp(-rate * dt));
+      p.heading = wrapAngle(p.heading);
+    }
+
+    const prevX = p.position.x;
+    const prevZ = p.position.z;
+    p.prevX = prevX;
+    p.prevZ = prevZ;
+    const nextX = prevX + vx * dt;
+    const nextZ = prevZ + vz * dt;
+    p.position.x = nextX;
+    p.position.z = nextZ;
+    this.resolveHorizontalCollision(p.position, 0.48, null, p);
+    // walls take the velocity into them (no phantom speed building up against a building)
+    if (Math.abs(p.position.x - nextX) > 1e-6 || Math.abs(p.position.z - nextZ) > 1e-6) {
+      vx = (p.position.x - prevX) / dt;
+      vz = (p.position.z - prevZ) / dt;
+    }
+    p.velX = vx;
+    p.velZ = vz;
+    // forward speed along the heading, and the sideways rest (as cars keep it), for traffic & the cameras
+    const sinH = Math.sin(p.heading), cosH = Math.cos(p.heading);
+    p.speed = vx * sinH + vz * cosH;
+    p.vx = vx - sinH * p.speed;
+    p.vz = vz - cosH * p.speed;
+    this.personVertical(p, dt, ctl.enabled && this.keys.up);
+  }
+
+  // Jumps, falls and kerbs for the pedestrian. The game reads landingSpeed (m/s, downwards) for fall damage.
+  personVertical(p, dt, jump) {
     const groundY = this.getGroundHeight(p.position.x, p.position.z, 'person');
     const JumpLeadTime = 0.085;
-    if (this.keys.up && p.position.y <= groundY + 0.02 && !p.jumping && !(p.jumpPrep > 0)) {
+    if (jump && p.position.y <= groundY + 0.02 && !p.jumping && !(p.jumpPrep > 0)) {
       p.jumpPrep = JumpLeadTime;
     }
     if (p.jumpPrep > 0) {
@@ -1295,6 +1446,7 @@ class ThirdPersonControllerManager {
       p.position.y += p.verticalVel * dt;
       if (p.position.y <= groundY) {
         p.position.y = groundY;
+        p.landingSpeed = Math.max(p.landingSpeed || 0, -p.verticalVel);
         p.verticalVel = 0;
         p.jumping = false;
       }
@@ -1309,17 +1461,57 @@ class ThirdPersonControllerManager {
 
   updateCar(dt) {
     if (dt <= 0) return;
-    const c = this.entities.car;
-
     let throttle = 0;
     if (this.keys.forward) throttle = this.keys.forward;
     else if (this.keys.backward) throttle = -this.keys.backward;
 
-    const braking = c.speed * throttle < 0;
-
     let steerInput = 0;
     if (this.keys.left) steerInput = this.keys.left;
     if (this.keys.right) steerInput = -this.keys.right;
+    if (this.gameMode && !this.personControl.enabled) throttle = steerInput = 0;
+    this.simulateCar(this.entities.car, dt, throttle, steerInput);
+    this.unstickCar(this.entities.car, dt, throttle);
+  }
+
+  // The car can't roll over (pitch and roll are the suspension's, clamped), but it can end up wedged: between two
+  // buildings' colliders narrower than itself, on a step of the ground it cannot climb either way. On the throttle
+  // without getting a car's length anywhere, forwards and backwards for STUCK_TIME in all (or one way for twice that:
+  // nose against a wall, reversing would do), it is lifted out to the nearest clear spot a little behind (or ahead),
+  // facing the way it was.
+  unstickCar(c, dt, throttle) {
+    const trying = Math.abs(throttle) > 0.4;
+    if (!Number.isFinite(c._stuckX) || Math.abs(c.speed) > 1.5 || Math.hypot(c.position.x - c._stuckX, c.position.z - c._stuckZ) > 2.5) {
+      c._stuckTime = 0;
+      c._stuckWays = 0;
+      c._stuckX = c.position.x;
+      c._stuckZ = c.position.z;
+      return;
+    }
+    if (!trying) return;
+    c._stuckWays = (c._stuckWays || 0) | (throttle > 0 ? 1 : 2);
+    c._stuckTime = (c._stuckTime || 0) + dt;
+    if (c._stuckTime < (c._stuckWays === 3 ? STUCK_TIME : STUCK_TIME * 2)) return;
+    c._stuckTime = 0;
+    c._stuckWays = 0;
+    const s = Math.sin(c.heading), co = Math.cos(c.heading);
+    for (const along of [-7, 7, -14, 14]) {
+      const x = c.position.x + s * along, z = c.position.z + co * along;
+      const p = this.findTeleportPosition(x, z, c.heading, 0);
+      if (!p || Math.hypot(p.x - c.position.x, p.z - c.position.z) < 3) continue;
+      this.teleportActiveTo(p.x, p.z, c.heading);
+      c.speed = c.vx = c.vz = c.angularVel = 0;
+      c.unstuckAt = performance.now(); // (for the game: it may want to say so)
+      return;
+    }
+  }
+
+  /**
+   * One step of the car model for any car entity: the player's (updateCar), and the game's parked, rolling or
+   * AI-driven world vehicles (throttle -1..1, steering +1 left .. -1 right).
+   */
+  simulateCar(c, dt, throttle = 0, steerInput = 0) {
+    if (dt <= 0) return;
+    const braking = c.speed * throttle < 0;
 
     const prevX = c.position.x;
     const prevZ = c.position.z;

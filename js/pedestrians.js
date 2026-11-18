@@ -721,6 +721,9 @@ const SHIRT_COLORS = [0xe8e6e0, 0xb8c4d8, 0xcfc8b8, 0x9aa7b8];
 const LEG_COLORS = [0x22242c, 0x35485b, 0x51473d, 0x7c7160, 0x252526];
 const LEG_COLORS_F = [0x1c1c22, 0x2f4a6e, 0x46413b, 0xcfc8bb, 0x5a2a2e];
 const SKIN_COLORS = [0xc68863, 0xa96f4c, 0x8a5535, 0x6b3d24, 0xd9a077];
+// A police officer's uniform (PersonRig.setOutfit('police')): a fluorescent yellow vest over navy sleeves and
+// trousers, a navy cap, black boots
+const POLICE_UNIFORM = { vest: 0xc6d82a, sleeves: 0x1c2638, trousers: 0x171d2a, cap: 0x121827 };
 const HAIR_COLORS = [0x1a1512, 0x3a2a1a, 0x584022, 0x6e6862, 0x2a2624, 0x8f6d43, 0x5e3020];
 
 // Branchless TSL palette selector from an array of hex colors and a [0..1) hash value
@@ -746,7 +749,10 @@ const qrot = (q, v) => v.add(cross(q.xyz, cross(q.xyz, v).add(v.mul(q.w))).mul(2
 function createPersonMaterial(pose, detail = 1) {
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   const base = int(instanceIndex).mul(STRIDE);
-  const info = pose.element(base.add(STRIDE - 1)); // seed, female, girth, hair
+  const info = pose.element(base.add(STRIDE - 1)); // seed, female (+ 2 in a police uniform), girth, hair
+  // (the outfit rides on the female flag: 0 / 1 plain clothes, 2 / 3 the uniform; see PersonRig.setOutfit)
+  const uniformed = step(1.5, info.y);
+  const femaleFlag = info.y.sub(uniformed.mul(2.0));
 
   mat.positionNode = Fn(() => {
     const skin = attribute('skin', 'vec4');
@@ -755,7 +761,7 @@ function createPersonMaterial(pose, detail = 1) {
     const hairAmount = mix(clamp(info.w.mul(2.0), 0.0, 1.0), clamp(info.w.mul(2.0).sub(1.0), 0.0, 1.0), step(PART.LONG_HAIR - 0.5, skin.w));
     const p = attribute('position', 'vec3')
       .add(vec3(extra.x, 0.0, extra.y).mul(info.z.sub(1.0)))
-      .add(attribute('femaleDelta', 'vec3').mul(info.y))
+      .add(attribute('femaleDelta', 'vec3').mul(femaleFlag))
       .add(attribute('hairDelta', 'vec3').mul(hairAmount));
     const n = attribute('normal', 'vec3');
     const w = skin.z;
@@ -781,21 +787,30 @@ function createPersonMaterial(pose, detail = 1) {
   const isHead = isPart(PART.HEAD);
   const isHairPart = step(PART.HAIR - 0.5, partId);
 
-  const female = info.y;
+  const female = femaleFlag;
+  const plain = float(1.0).sub(uniformed);
   const lane = (salt) => fract(sin(info.x.add(salt).mul(12.9898)).mul(43758.5453));
   const skinCol = vertexStage(pickColorFromPalette(SKIN_COLORS, lane(17.0))).toVar();
-  const hairCol = vertexStage(pickColorFromPalette(HAIR_COLORS, lane(3.0))).toVar();
+  const hairCol = vertexStage(mix(pickColorFromPalette(HAIR_COLORS, lane(3.0)), color(POLICE_UNIFORM.cap), uniformed)).toVar();
   const coatCol = vertexStage(
-    mix(pickColorFromPalette(COAT_COLORS, lane(29.0)), pickColorFromPalette(COAT_COLORS_F, lane(29.0)), female)
+    mix(
+      mix(pickColorFromPalette(COAT_COLORS, lane(29.0)), pickColorFromPalette(COAT_COLORS_F, lane(29.0)), female),
+      mix(color(POLICE_UNIFORM.vest), color(POLICE_UNIFORM.sleeves), isArm),
+      uniformed
+    )
   ).toVar();
   const shirtCol = vertexStage(pickColorFromPalette(SHIRT_COLORS, lane(71.0))).toVar();
   const legsCol = vertexStage(
-    mix(pickColorFromPalette(LEG_COLORS, lane(47.0)), pickColorFromPalette(LEG_COLORS_F, lane(47.0)), female)
+    mix(
+      mix(pickColorFromPalette(LEG_COLORS, lane(47.0)), pickColorFromPalette(LEG_COLORS_F, lane(47.0)), female),
+      color(POLICE_UNIFORM.trousers),
+      uniformed
+    )
   ).toVar();
-  const bald = vertexStage(step(lane(41.0), 0.08).mul(float(1.0).sub(female))).toVar();
-  const tailored = vertexStage(step(0.42, lane(89.0))).toVar();
+  const bald = vertexStage(step(lane(41.0), 0.08).mul(float(1.0).sub(female)).mul(plain)).toVar();
+  const tailored = vertexStage(step(0.42, lane(89.0)).mul(plain)).toVar();
   const hemY = vertexStage(mix(mix(0.955, 0.88, female), 1.0, lane(61.0))).toVar();
-  const sneaker = vertexStage(step(0.4, lane(5.0))).toVar();
+  const sneaker = vertexStage(step(0.4, lane(5.0)).mul(plain)).toVar();
   const upperCol = vertexStage(
     mix(
       mix(color(0x201e1c), color(0x4a3524), lane(23.0)),
@@ -1151,6 +1166,10 @@ const _bz = new THREE.Vector3();
 const _ux = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _rootPos = new THREE.Vector3();
+const _aimDir = new THREE.Vector3();
+const _aimGrip = new THREE.Vector3();
+const _aimShoulder = new THREE.Vector3();
+const _aimHand = new THREE.Vector3();
 const AX = new THREE.Vector3(1, 0, 0);
 const AY = new THREE.Vector3(0, 1, 0);
 const AZ = new THREE.Vector3(0, 0, 1);
@@ -1241,9 +1260,32 @@ class PersonRig {
     this.leanAt = this.time + IDLE.minHold * hash01(seed + 0.5);
     this.diving = false;
     this.diveGround = 0;
+    this.aimWeight = 0; // arms raised to aim (the game's player, see solveAimArms)
+    this.aimYaw = 0;
+    this.aimPitch = 0;
+    // (js/game/weapons.js shapes the hold per weapon: the grip's reach out from the right shoulder (m for a 1.75 m
+    // person; a punch shoots it out), the left hand along the aim from the grip (a rifle's fore-end is ahead of it)
+    // and how far the left hand comes up at all (0: it hangs, for a one-handed punch or throw))
+    // 0..1: how far down in a crouch (the game eases it; knees fold under the dropped pelvis, the back leans in)
+    this.crouch = 0;
+    this.aimReach = 0.5;
+    this.aimSupport = -0.12;
+    this.aimLeft = 1;
     this.feet = [makeFoot(1), makeFoot(-1)];
     this.pose = new Float32Array(STRIDE * 4);
     this.pose.set([seed, this.female, girth, hair], (STRIDE - 1) * 4);
+    this.hair = hair;
+    this.outfit = null;
+  }
+
+  /** What they wear: null (their own clothes) or 'police' (the uniform; short hair under a cap) */
+  setOutfit(outfit = null) {
+    const next = outfit === 'police' ? 'police' : null;
+    if (next === this.outfit) return;
+    this.outfit = next;
+    const o = (STRIDE - 1) * 4;
+    this.pose[o + 1] = this.female + (next ? 2 : 0);
+    this.pose[o + 3] = next ? Math.min(this.hair, 0.3) : this.hair;
   }
 
   get legLength() {
@@ -1663,7 +1705,7 @@ class PersonRig {
     const prepSquat = smooth(0, 0.78, this.jumpPrep) * (1 - 0.55 * smooth(0.82, 1, this.jumpPrep));
     const prepPush = smooth(0.76, 1, this.jumpPrep);
     const targetPelvisTilt = 0.025 + (0.02 * g + (0.055 + 0.035 * sprint) * run) * fwdLean
-      + 0.14 * prepSquat * (1 - 0.5 * run);
+      + 0.14 * prepSquat * (1 - 0.5 * run) + 0.2 * this.crouch;
     this.pelvisTilt += (targetPelvisTilt - this.pelvisTilt) * (this.jumpPrep > 0.01 ? _e045 : _e15);
     this.spreadF = spreadF;
     const turnArm = Math.sin(2 * Math.PI * this.phase) * 0.22 * smooth(0.4, 2.2, Math.abs(this.yawRate)) * (1 - g);
@@ -1713,7 +1755,7 @@ class PersonRig {
       }
     }
     this.basePelvisY += (y - this.basePelvisY) * _e045;
-    const prepDrop = s * lerp(0.115, 0.048, run) * prepSquat - s * 0.018 * prepPush;
+    const prepDrop = s * lerp(0.115, 0.048, run) * prepSquat - s * 0.018 * prepPush + s * 0.3 * this.crouch;
     this.pelvisY = this.basePelvisY - this.landDrop - prepDrop;
   }
 
@@ -2094,14 +2136,14 @@ class PersonRig {
     const landNorm = this.landDrop / s;
     const breathe = Math.sin(this.time * 1.7) * 0.008 * idle;
     const chestLean = 0.012 + (0.018 * g + (0.065 + 0.035 * sprint) * run) * fwdLean
-      + 0.2 * prepSquat * (1 - 0.5 * run) - 0.07 * airB * clamp01(vyNorm) + 1.15 * landNorm;
+      + 0.2 * prepSquat * (1 - 0.5 * run) - 0.07 * airB * clamp01(vyNorm) + 1.15 * landNorm + 0.3 * this.crouch;
     _qChest.copy(_qPelvis)
       .multiply(qY(_q, -1.75 * this.pelvisYaw))
       .multiply(qX(_q, chestLean + breathe))
       .multiply(qZ(_q, -0.8 * this.pelvisRoll));
     this.writeBone(BONE.CHEST, _qChest, this.jointFrom(BONE.PELVIS, BONE.CHEST, _qPelvis, _pelvis, _chest));
     const look = Math.sin(this.time * 0.37 + this.seed) * 0.22 * idle * idle;
-    const headPitch = 0.015 * idle - 0.02 * run * (1 - this.back) - 0.16 * prepSquat - 0.04 * airB * clamp01(vyNorm) - 0.38 * landNorm;
+    const headPitch = 0.015 * idle - 0.02 * run * (1 - this.back) - 0.16 * prepSquat - 0.04 * airB * clamp01(vyNorm) - 0.38 * landNorm - 0.4 * this.crouch;
     qY(_qa, yaw + this.headTurn + look).multiply(qX(_q, headPitch));
     this.writeBone(BONE.HEAD, _qa, this.jointFrom(BONE.CHEST, BONE.HEAD, _qChest, _chest, _v));
 
@@ -2156,6 +2198,35 @@ class PersonRig {
       const elbow = lerp(groundElbow, airElbow, airB);
       this.jointFrom(LIMB.upperArm[i], LIMB.forearm[i], _qUpper, _shoulder, _v);
       this.writeBone(LIMB.forearm[i], _q2.copy(_qUpper).multiply(qX(_q, -elbow)), _v);
+    }
+    if (this.aimWeight > 0.001) this.solveAimArms();
+  }
+
+  // Arms raised to aim (the game's player): both hands meet at a grip out in front of the right shoulder along the
+  // aim (aimYaw, aimPitch: + looking down), the left hand supporting just behind; aimWeight (0..1) blends them up
+  // from hanging at the sides. Overrides the arm bones solve() wrote.
+  solveAimArms() {
+    const s = this.s;
+    const w = this.aimWeight;
+    const cp = Math.cos(this.aimPitch), sp = Math.sin(this.aimPitch);
+    _aimDir.set(Math.sin(this.aimYaw) * cp, -sp, Math.cos(this.aimYaw) * cp);
+    _fwd.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    // the right shoulder (index 1: -X), and the grip a forearm and a half out from it, a little in towards the middle
+    this.jointFrom(BONE.CHEST, LIMB.upperArm[1], _qChest, _chest, _aimGrip);
+    _aimGrip.addScaledVector(_aimDir, this.aimReach * s);
+    _aimGrip.x += Math.cos(this.yaw) * 0.07 * s;
+    _aimGrip.z -= Math.sin(this.yaw) * 0.07 * s;
+    for (let i = 0; i < 2; i++) {
+      const side = SIDES[i];
+      this.jointFrom(BONE.CHEST, LIMB.upperArm[i], _qChest, _chest, _aimShoulder);
+      // hanging at the side, and up on the grip (the supporting left hand 12 cm behind it)
+      _aimHand.set(_aimShoulder.x + _fwd.x * 0.06 * s, _aimShoulder.y - 0.56 * s, _aimShoulder.z + _fwd.z * 0.06 * s);
+      _target.copy(_aimGrip);
+      if (side > 0) _target.addScaledVector(_aimDir, this.aimSupport * s);
+      _target.lerp(_aimHand, 1 - w * (side > 0 ? this.aimLeft : 1));
+      _pole.set(side * 0.75, -1, -0.35);
+      _pole.set(_pole.x * Math.cos(this.yaw) + _pole.z * Math.sin(this.yaw), _pole.y, -_pole.x * Math.sin(this.yaw) + _pole.z * Math.cos(this.yaw));
+      this.limb(LIMB.upperArm[i], LIMB.forearm[i], _aimShoulder, _target, UPPER_ARM * s, (FOREARM + 0.07) * s, _pole, _fwd, side * ARM_BIND_ABDUCTION);
     }
   }
 

@@ -29,6 +29,17 @@ const LOOKS = {
   midnight: { exposure: 1.04, contrast: 1.08, saturation: 1.06, balance: [0.985, 1.00, 1.035], bloom: 0.30, threshold: 1.00 }
 };
 
+// The game's grade over the look (js/game/fx.js: game.fx.grade), shared by every pipeline's grade: a few multiplies
+// in the final pass, where the HUD used to put a CSS filter on the canvas (an extra full-screen compositing pass
+// every frame, in display rather than scene light)
+const gameGrade = {
+  desaturate: uniform(0), // 0..1 towards grey (low health, wasted)
+  vignette: uniform(0), // 0..1 extra darkening in from the edges
+  damagePulse: uniform(0), // 0..1 a red rush in from the edges (a hit)
+  brightness: uniform(1),
+  tint: uniform(new THREE.Color(1, 1, 1)) // multiplied in (a cold wash, a warm one)
+};
+
 function createPostProcessing(renderer, sceneColor, reflections) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   // Exposure is applied before bloom so its threshold follows the image's exposed brightness.
@@ -66,12 +77,18 @@ function createPostProcessing(renderer, sceneColor, reflections) {
     const chroma = max(max(color.r, color.g), color.b).sub(min(min(color.r, color.g), color.b));
     const vibrance = float(0.10).mul(float(1).sub(chroma.div(max(max(max(color.r, color.g), color.b), 0.0001))));
     color.assign(max(mix(vec3(gray), color, saturation.add(vibrance)), vec3(0)));
+    // the game's grade
+    color.assign(mix(color, vec3(dot(color, vec3(0.2126, 0.7152, 0.0722))), gameGrade.desaturate).mul(gameGrade.tint).mul(gameGrade.brightness));
 
     // Normalize by the corner radius so the lens falloff remains subtle in portrait and landscape.
     const aspect = screenSize.x.div(screenSize.y);
     const radius = length(screenUV.sub(0.5).mul(vec2(aspect, 1))).div(length(vec2(aspect, 1).mul(0.5)));
-    const vignette = float(1).sub(smoothstep(0.35, 1.0, radius).mul(0.12));
-    return vec4(color.mul(vignette), 1.0);
+    const edge = smoothstep(0.3, 1.05, radius);
+    const vignette = float(1).sub(smoothstep(0.35, 1.0, radius).mul(0.12)).sub(edge.mul(gameGrade.vignette).mul(0.6));
+    // a hit: the edges flush deep red, keeping their shading
+    const hurt = smoothstep(0.18, 0.95, radius).mul(gameGrade.damagePulse);
+    color.assign(mix(color, vec3(0.78, 0.04, 0.05).mul(max(luma, 0.06).mul(1.4).add(0.06)), hurt.mul(0.72)));
+    return vec4(color.mul(max(vignette, 0.0)), 1.0);
   })();
 
   function applyPreset(id) {
@@ -88,4 +105,4 @@ function createPostProcessing(renderer, sceneColor, reflections) {
   return { outputNode, applyPreset };
 }
 
-export { createPostProcessing };
+export { createPostProcessing, gameGrade };
