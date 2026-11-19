@@ -1,4 +1,4 @@
-# City of Steals — a Slop Auckland caper
+# City of Sails — a Slop Auckland caper
 
 An open-world crime caper in the browser, set in a 3D simulation of real central Auckland (Tāmaki Makaurau), New
 Zealand. You are a washed-up cabbie who owes Aunty Mere for his taxi, caught between Dougie "Two Flats" and the Gull
